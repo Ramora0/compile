@@ -1,0 +1,489 @@
+/* ============================================================
+   COMPILE — hi-fi design system
+   dark · saturated · technological
+   ============================================================ */
+
+:root {
+  /* surface tone — deep blue-black with violet undertone */
+  --void:    #06061a;
+  --void-2:  #0c0b22;
+  --void-3:  #14132f;
+  --void-4:  #1d1c40;
+
+  /* core palette */
+  --purple-300: #c4b5fd;
+  --purple-400: #a78bfa;
+  --purple-500: #8b5cf6;
+  --purple-600: #7c3aed;
+  --purple-glow: 139, 92, 246;          /* used in rgba(var(--purple-glow), x) */
+
+  /* lines & ink */
+  --line-1: rgba(245, 243, 255, 0.06);
+  --line-2: rgba(245, 243, 255, 0.12);
+  --line-3: rgba(245, 243, 255, 0.20);
+
+  --ink:       #f5f3ff;
+  --ink-dim:   rgba(245, 243, 255, 0.62);
+  --ink-faint: rgba(245, 243, 255, 0.36);
+  --ink-quiet: rgba(245, 243, 255, 0.18);
+
+  /* element colors — saturated, distinct */
+  --fire:    #ff3d5c;
+  --fire-rgb: 255, 61, 92;
+  --water:   #22d3ee;
+  --water-rgb: 34, 211, 238;
+  --light:   #fbbf24;
+  --light-rgb: 251, 191, 36;
+  --life:    #22c55e;
+  --life-rgb: 34, 197, 94;
+  --plague:  #a3e635;
+  --plague-rgb: 163, 230, 53;
+  --psychic: #e879f9;
+  --psychic-rgb: 232, 121, 249;
+  --metal:   #94a3b8;
+  --metal-rgb: 148, 163, 184;
+  --void-el: #a855f7;
+  --void-el-rgb: 168, 85, 247;
+  --speed:   #fb923c;
+  --speed-rgb: 251, 146, 60;
+  --death:   #ef4444;
+  --death-rgb: 239, 68, 68;
+  --spirit:  #e0e7ff;
+  --spirit-rgb: 224, 231, 255;
+  --gravity: #6366f1;
+  --gravity-rgb: 99, 102, 241;
+
+  /* radii */
+  --r-xs: 2px;
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 12px;
+
+  /* shadow / glow */
+  --shadow-card: 0 12px 32px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.5);
+  --shadow-deep: 0 22px 60px rgba(0, 0, 0, 0.7);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #compile-root {
+  margin: 0;
+  height: 100%;
+  background: var(--void);
+  color: var(--ink);
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  font-feature-settings: "ss01", "cv11";
+  overflow: hidden;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-feature-settings: "ss02", "cv02";
+}
+.disp { font-family: 'Space Grotesk', sans-serif; }
+
+/* ─────────── scaling stage ─────────── */
+
+.cp-stage {
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(1400px 1000px at 20% 0%, rgba(var(--purple-glow), 0.18), transparent 60%),
+    radial-gradient(1200px 900px at 90% 100%, rgba(var(--void-el-rgb), 0.10), transparent 55%),
+    var(--void);
+  overflow: hidden;
+}
+
+/* ambient grid overlay */
+.cp-stage::before {
+  content: '';
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(245,243,255,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(245,243,255,0.03) 1px, transparent 1px);
+  background-size: 64px 64px, 64px 64px;
+  pointer-events: none;
+  mask-image: radial-gradient(circle at 50% 50%, black, transparent 90%);
+}
+
+/* scaled canvas — 1920×1200 */
+.cp-canvas {
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 1920px; height: 1200px;
+  transform-origin: center center;
+  transform: translate(-50%, -50%) scale(var(--cp-scale, 1));
+}
+
+/* ─────────── chrome / shell ─────────── */
+
+.cp-topnav {
+  position: absolute;
+  top: 18px; left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: rgba(8, 6, 26, 0.7);
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  backdrop-filter: blur(20px);
+  z-index: 50;
+}
+.cp-topnav button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 8px 18px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.cp-topnav button:hover { color: var(--ink); }
+.cp-topnav button.active {
+  background: var(--purple-500);
+  color: #fff;
+  box-shadow: 0 0 24px rgba(var(--purple-glow), 0.45);
+}
+
+/* ─────────── panels ─────────── */
+
+.cp-panel {
+  background:
+    linear-gradient(180deg, rgba(245,243,255,0.025), rgba(245,243,255,0.005)),
+    rgba(13, 11, 34, 0.6);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  position: relative;
+  backdrop-filter: blur(8px);
+}
+
+.cp-panel-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* angled-cut variant — sleek cyberpunk corner */
+.cp-cut {
+  clip-path: polygon(
+    0 0,
+    calc(100% - 14px) 0,
+    100% 14px,
+    100% 100%,
+    14px 100%,
+    0 calc(100% - 14px)
+  );
+}
+
+/* glow ring helper */
+.cp-glow-purple { box-shadow: 0 0 0 1px var(--purple-500), 0 0 24px rgba(var(--purple-glow), 0.4); }
+
+/* chip / pill */
+.cp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  background: rgba(255,255,255,0.02);
+}
+.cp-chip .dot { width: 6px; height: 6px; border-radius: 999px; background: currentColor; box-shadow: 0 0 8px currentColor; }
+.cp-chip.active {
+  background: var(--purple-500);
+  border-color: var(--purple-500);
+  color: #fff;
+  box-shadow: 0 0 16px rgba(var(--purple-glow), 0.6);
+}
+
+/* buttons */
+.cp-btn {
+  appearance: none;
+  border: 1px solid var(--line-3);
+  background: rgba(255,255,255,0.02);
+  color: var(--ink);
+  padding: 10px 18px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.18s ease;
+}
+.cp-btn:hover { border-color: var(--ink-dim); background: rgba(255,255,255,0.04); }
+.cp-btn.primary {
+  background: linear-gradient(180deg, var(--purple-500), var(--purple-600));
+  border-color: var(--purple-400);
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.1) inset, 0 6px 22px rgba(var(--purple-glow), 0.55);
+}
+.cp-btn.primary:hover { filter: brightness(1.1); }
+.cp-btn.ghost { border-color: var(--line-2); color: var(--ink-dim); background: transparent; }
+
+/* ─────────── card visuals ─────────── */
+
+/* CARD — holographic hand card */
+.cp-card {
+  position: relative;
+  width: 188px;
+  height: 268px;
+  border-radius: var(--r-md);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.4)),
+    var(--void-2);
+  border: 1px solid var(--el-color, var(--line-2));
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.04) inset,
+    0 0 18px rgba(var(--el-rgb, 255,255,255), 0.18),
+    var(--shadow-card);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.cp-card.facedown {
+  background:
+    repeating-linear-gradient(45deg, rgba(var(--purple-glow), 0.18) 0 6px, transparent 6px 12px),
+    radial-gradient(circle at 50% 40%, rgba(var(--purple-glow), 0.4), transparent 70%),
+    var(--void-3);
+  border-color: var(--purple-500);
+  box-shadow: 0 0 0 1px var(--purple-500) inset, 0 6px 22px rgba(var(--purple-glow), 0.3);
+}
+.cp-card.facedown .cp-card-inner { display: none; }
+
+.cp-card-inner {
+  position: relative;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 14px;
+  z-index: 2;
+}
+
+/* holographic sheen overlay */
+.cp-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(125deg, transparent 30%, rgba(255,255,255,0.08) 45%, transparent 60%),
+    conic-gradient(from 200deg at 30% 20%,
+      rgba(var(--el-rgb, 255,255,255), 0.0),
+      rgba(var(--el-rgb, 255,255,255), 0.18) 25%,
+      rgba(var(--el-rgb, 255,255,255), 0.0) 50%);
+  mix-blend-mode: screen;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* header row */
+.cp-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.cp-card-el {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  font-weight: 700;
+  color: var(--el-color);
+  text-transform: uppercase;
+}
+.cp-card-num {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 0.9;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+
+/* art zone — holographic gradient w/ scan lines */
+.cp-card-art {
+  flex: 1;
+  position: relative;
+  border-radius: var(--r-sm);
+  background:
+    repeating-linear-gradient(0deg, transparent 0 3px, rgba(0,0,0,0.15) 3px 4px),
+    radial-gradient(120% 100% at 20% 0%,
+      rgba(var(--el-rgb), 0.55),
+      rgba(var(--el-rgb), 0.18) 50%,
+      transparent 80%),
+    linear-gradient(135deg, rgba(var(--el-rgb), 0.45), rgba(var(--void-el-rgb), 0.35) 60%, transparent);
+  border: 1px solid rgba(var(--el-rgb), 0.35);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+.cp-card-art::before {
+  /* faux glyph in the art */
+  content: var(--el-glyph, '◆');
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 64px;
+  color: rgba(255,255,255,0.18);
+  font-family: 'JetBrains Mono', monospace;
+  filter: drop-shadow(0 0 12px rgba(var(--el-rgb), 0.5));
+}
+
+.cp-card-effect {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 12.5px;
+  line-height: 1.25;
+  color: var(--ink);
+}
+
+.cp-card-foot {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  display: flex;
+  justify-content: space-between;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8.5px;
+  letter-spacing: 0.14em;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+}
+
+/* field card — smaller, board-played */
+.cp-card.field {
+  width: 124px;
+  height: 174px;
+}
+.cp-card.field .cp-card-inner { padding: 9px 10px; }
+.cp-card.field .cp-card-el { font-size: 9px; letter-spacing: 0.16em; }
+.cp-card.field .cp-card-num { font-size: 22px; }
+.cp-card.field .cp-card-art { margin-bottom: 6px; }
+.cp-card.field .cp-card-art::before { font-size: 44px; }
+.cp-card.field .cp-card-effect { font-size: 9.5px; line-height: 1.2; }
+.cp-card.field .cp-card-foot { font-size: 7.5px; padding-top: 4px; }
+
+/* sigil pip — used as a small element marker */
+.cp-sigil {
+  display: inline-grid;
+  place-items: center;
+  width: 22px; height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--el-color);
+  color: var(--el-color);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  background: rgba(var(--el-rgb), 0.1);
+  box-shadow: 0 0 12px rgba(var(--el-rgb), 0.4) inset, 0 0 0 1px rgba(var(--el-rgb), 0.3);
+}
+.cp-sigil.big { width: 36px; height: 36px; font-size: 18px; }
+.cp-sigil.xl  { width: 56px; height: 56px; font-size: 28px; }
+
+/* compile bar */
+.cp-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  overflow: hidden;
+}
+.cp-bar > i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--el-color), var(--el-color));
+  box-shadow: 0 0 12px var(--el-color);
+  border-radius: 999px;
+  transition: width 0.5s cubic-bezier(.2,.7,.3,1);
+}
+.cp-bar.compiled > i {
+  background:
+    repeating-linear-gradient(45deg, var(--el-color) 0 6px, color-mix(in oklch, var(--el-color), white 22%) 6px 12px);
+}
+
+/* element classes — set CSS vars per element */
+.el-fire    { --el-color: var(--fire);    --el-rgb: var(--fire-rgb);    --el-glyph: '\\25B2'; }
+.el-water   { --el-color: var(--water);   --el-rgb: var(--water-rgb);   --el-glyph: '\\25C7'; }
+.el-light   { --el-color: var(--light);   --el-rgb: var(--light-rgb);   --el-glyph: '\\25CB'; }
+.el-life    { --el-color: var(--life);    --el-rgb: var(--life-rgb);    --el-glyph: '\\271A'; }
+.el-plague  { --el-color: var(--plague);  --el-rgb: var(--plague-rgb);  --el-glyph: '\\203B'; }
+.el-psychic { --el-color: var(--psychic); --el-rgb: var(--psychic-rgb); --el-glyph: '\\25EC'; }
+.el-metal   { --el-color: var(--metal);   --el-rgb: var(--metal-rgb);   --el-glyph: '\\25C8'; }
+.el-void    { --el-color: var(--void-el); --el-rgb: var(--void-el-rgb); --el-glyph: '\\2B22'; }
+.el-speed   { --el-color: var(--speed);   --el-rgb: var(--speed-rgb);   --el-glyph: '\\2301'; }
+.el-death   { --el-color: var(--death);   --el-rgb: var(--death-rgb);   --el-glyph: '\\2715'; }
+.el-spirit  { --el-color: var(--spirit);  --el-rgb: var(--spirit-rgb);  --el-glyph: '\\25CA'; }
+.el-gravity { --el-color: var(--gravity); --el-rgb: var(--gravity-rgb); --el-glyph: '\\25C9'; }
+
+/* utility */
+.row { display: flex; flex-direction: row; }
+.col { display: flex; flex-direction: column; }
+.gap-1 { gap: 4px; } .gap-2 { gap: 8px; } .gap-3 { gap: 12px; } .gap-4 { gap: 16px; } .gap-6 { gap: 24px; }
+.between { justify-content: space-between; }
+.center { align-items: center; justify-content: center; }
+.middle { align-items: center; }
+.grow { flex: 1; }
+
+/* faint scanlines on full-screen ambient */
+.cp-scanlines::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(0deg, transparent 0 2px, rgba(255,255,255,0.012) 2px 3px);
+  pointer-events: none;
+}
+
+/* COMPILED tag */
+.cp-compiled-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--el-color);
+  border: 1px solid var(--el-color);
+  background: rgba(var(--el-rgb), 0.12);
+  border-radius: 2px;
+  box-shadow: 0 0 12px rgba(var(--el-rgb), 0.4);
+}
+
+/* lane half — when compiled, gets subtle el-color tint */
+.cp-lane-compiled {
+  background: linear-gradient(180deg, rgba(var(--el-rgb), 0.10), rgba(var(--el-rgb), 0.02));
+}
+.cp-lane-compiled.bottom {
+  background: linear-gradient(0deg, rgba(var(--el-rgb), 0.10), rgba(var(--el-rgb), 0.02));
+}
+
+/* drop indicator pulsing border */
+@keyframes cp-pulse-border {
+  0%, 100% { box-shadow: 0 0 0 1px var(--purple-400), 0 0 24px rgba(var(--purple-glow), 0.4); }
+  50%      { box-shadow: 0 0 0 2px var(--purple-300), 0 0 36px rgba(var(--purple-glow), 0.6); }
+}
+.cp-drop-active {
+  animation: cp-pulse-border 1.6s ease-in-out infinite;
+  background: rgba(var(--purple-glow), 0.06);
+}
+
+/* subtle floating animation on the held element */
+@keyframes cp-float {
+  0%, 100% { transform: translateY(0) rotate(-1.5deg); }
+  50%      { transform: translateY(-6px) rotate(-1.5deg); }
+}
+.cp-floating { animation: cp-float 2.4s ease-in-out infinite; }
