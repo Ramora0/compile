@@ -87,14 +87,7 @@ const spirit3: CardDef = {
     on: "after-draw",
     scope: "self",
     resolve: function* (ctx) {
-      const choice = yield* ctx.promptOption({
-        options: [
-          { id: "yes", label: "Shift this" },
-          { id: "no", label: "Skip" },
-        ],
-        reason: "spirit-3-may-shift",
-      });
-      if (choice !== "yes") return;
+      if (!(yield* h.confirm(ctx, "Shift this", "spirit-3-may-shift"))) return;
       const loc = findCardOnField(ctx.state(), ctx.thisInstanceId);
       if (!loc) return;
       const allowed: LineIdx[] = ([0, 1, 2] as LineIdx[]).filter((l) => l !== loc.lineIdx);

@@ -192,13 +192,23 @@ html, body, #root {
   color: var(--ink-dim);
   background: transparent;
 }
+.cp-btn.is-selected {
+  box-shadow:
+    0 0 0 2px var(--purple-200, #d4bfff),
+    0 0 24px rgba(var(--purple-glow), 0.7);
+  filter: brightness(1.15);
+}
 
 /* ─────────── card visuals ─────────── */
 
+/* Every dimension and font size below derives from --cp-card-w (set inline by
+   the Card component, or via `.cp-card.field`). One number controls the whole
+   card, so the hand can pass a smaller width and the text scales with it. */
 .cp-card {
+  --cp-card-w: 248px;
   position: relative;
-  width: 208px;
-  height: 296px;
+  width: var(--cp-card-w);
+  height: calc(var(--cp-card-w) * 1.4194);
   border-radius: var(--r-md);
   background:
     linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.4)),
@@ -226,7 +236,7 @@ html, body, #root {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 10px 12px;
+  padding: calc(var(--cp-card-w) * 0.04) calc(var(--cp-card-w) * 0.048);
   z-index: 2;
 }
 
@@ -249,19 +259,19 @@ html, body, #root {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  margin-bottom: 6px;
+  margin-bottom: calc(var(--cp-card-w) * 0.024);
 }
 .cp-card-el {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  letter-spacing: 0.2em;
+  font-size: calc(var(--cp-card-w) * 0.068);
+  letter-spacing: 0.14em;
   font-weight: 700;
   color: var(--el-color);
   text-transform: uppercase;
 }
 .cp-card-num {
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 32px;
+  font-size: calc(var(--cp-card-w) * 0.157);
   font-weight: 700;
   line-height: 0.9;
   color: var(--ink);
@@ -272,7 +282,7 @@ html, body, #root {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: calc(var(--cp-card-w) * 0.016);
   min-height: 0;
 }
 .cp-card-rule {
@@ -280,7 +290,7 @@ html, body, #root {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 5px 7px;
+  padding: calc(var(--cp-card-w) * 0.02) calc(var(--cp-card-w) * 0.028);
   background: rgba(0, 0, 0, 0.32);
   border: 1px solid rgba(var(--el-rgb), 0.18);
   border-left: 2px solid rgba(var(--el-rgb), 0.45);
@@ -296,8 +306,8 @@ html, body, #root {
 }
 .cp-card-rule-body {
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 11.5px;
-  line-height: 1.22;
+  font-size: calc(var(--cp-card-w) * 0.068);
+  line-height: 1.2;
   color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -310,39 +320,54 @@ html, body, #root {
   font-style: italic;
 }
 
-/* field card */
-.cp-card.field { width: 140px; height: 196px; }
-.cp-card.field .cp-card-inner { padding: 7px 8px; }
-.cp-card.field .cp-card-el { font-size: 9.5px; letter-spacing: 0.14em; }
-.cp-card.field .cp-card-num { font-size: 22px; }
-.cp-card.field .cp-card-head { margin-bottom: 4px; }
-.cp-card.field .cp-card-rules { gap: 2px; }
-.cp-card.field .cp-card-rule { padding: 2px 5px; }
-.cp-card.field .cp-card-rule-body {
-  font-size: 9.5px;
-  line-height: 1.15;
-  -webkit-line-clamp: 5;
-}
+/* field card — same proportional layout, smaller width drives everything */
+.cp-card.field { --cp-card-w: 140px; }
+.cp-card.field .cp-card-rule-body { -webkit-line-clamp: 5; }
 
-/* face-down overlay — the back of a card rendered on top of the inner face,
-   so hover-to-reveal can simply cross-fade the cover off. Used by the Card
-   component (the legacy `.cp-card.facedown` class is kept around for tiny
-   purely-cosmetic placeholders like the opponent's mini-hand). */
+/* face-down card — the whole .cp-card is the 3D flipper. The card starts
+   rotated 180deg around Y (cover facing viewer); on hover it rotates to 0
+   (inner facing viewer). The .cp-card's own border, background, ::after
+   gloss, and box-shadow all rotate together with the card, so the entire
+   card visibly turns over.
+
+   overflow:hidden would force transform-style to flat, so we drop it and
+   rely on each face/pseudo having matching border-radius for corner clip. */
 .cp-card.has-facedown-cover {
   border-color: var(--purple-500);
   box-shadow:
     0 0 0 1px var(--purple-500) inset,
     0 6px 22px rgba(var(--purple-glow), 0.3);
+  overflow: visible;
+  transform-style: preserve-3d;
+  -webkit-transform-style: preserve-3d;
+  transform: perspective(1100px) rotateY(180deg);
+  transition:
+    transform 0.55s cubic-bezier(0.4, 0.05, 0.2, 1),
+    border-color 0.35s ease,
+    box-shadow 0.35s ease;
 }
+/* gloss pseudo needs to rotate as part of the card front; with overflow
+   gone we also need it to respect the card's rounded corners. */
+.cp-card.has-facedown-cover::after {
+  border-radius: var(--r-md);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
 .cp-card.has-facedown-cover .cp-card-inner {
-  opacity: 0;
-  transition: opacity 0.22s ease;
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
 }
+
 .cp-card-facedown-cover {
   position: absolute;
   inset: 0;
   z-index: 3;
-  border-radius: inherit;
+  border-radius: var(--r-md);
   background:
     repeating-linear-gradient(45deg, rgba(var(--purple-glow), 0.18) 0 6px, transparent 6px 12px),
     radial-gradient(circle at 50% 40%, rgba(var(--purple-glow), 0.4), transparent 70%),
@@ -350,45 +375,57 @@ html, body, #root {
   display: flex;
   align-items: flex-start;
   justify-content: flex-end;
-  padding: 8px 10px;
-  transition: opacity 0.22s ease;
+  padding: calc(var(--cp-card-w) * 0.032) calc(var(--cp-card-w) * 0.04);
+  transform: rotateY(180deg);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
   pointer-events: none;
 }
 .cp-card-facedown-points {
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 22px;
+  font-size: calc(var(--cp-card-w) * 0.09);
   font-weight: 700;
   line-height: 1;
   color: var(--purple-300);
   text-shadow: 0 0 8px rgba(var(--purple-glow), 0.7);
 }
-.cp-card.field .cp-card-facedown-cover { padding: 4px 6px; }
+/* Field cards intentionally show the face-down value larger than proportional
+   so it stays readable on the smaller card body. */
 .cp-card.field .cp-card-facedown-points { font-size: 20px; }
 
-/* Reveal-on-hover: opacity cross-fade. Only attached for the local player's
-   own face-down table cards — opp face-down cards never get this class. */
+/* Reveal-on-hover: rotate the whole card so the front face swings into
+   view. Only attached for the local player's own face-down table cards —
+   opp face-down cards never get this class. The border color also fades
+   from purple (face-down) to the element color (face-up) during the flip. */
 .cp-card.reveal-on-hover:hover {
   border-color: var(--el-color, var(--line-2));
   box-shadow:
     0 0 0 1px rgba(255,255,255,0.04) inset,
     0 0 18px rgba(var(--el-rgb, 255,255,255), 0.18),
     var(--shadow-card);
+  transform: perspective(1100px) rotateY(0deg);
 }
-.cp-card.reveal-on-hover:hover .cp-card-facedown-cover { opacity: 0; }
-.cp-card.reveal-on-hover:hover .cp-card-inner { opacity: 1; }
 
-/* sigil pip */
+/* sigil pip — symbol glyphs in this font sit a touch below the line-box
+   center (no descender mass to balance the ascender), so we collapse the
+   line-height and nudge the glyph up by ~1px for true optical centering. */
 .cp-sigil {
-  display: inline-grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 22px; height: 22px;
   border-radius: 999px;
   border: 1px solid var(--el-color);
   color: var(--el-color);
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
+  line-height: 1;
   background: rgba(var(--el-rgb), 0.1);
   box-shadow: 0 0 12px rgba(var(--el-rgb), 0.4) inset, 0 0 0 1px rgba(var(--el-rgb), 0.3);
+}
+.cp-sigil-glyph {
+  display: block;
+  transform: translateY(-1px);
 }
 
 /* compile bar */
@@ -543,18 +580,25 @@ html, body, #root {
   filter: drop-shadow(0 22px 32px rgba(0, 0, 0, 0.6)) !important;
 }
 
-/* hand-card wrapper: hover blows the card up in place so rules are easy to
-   read. Hovered card lifts above lanes / right rail via z-index; the hand
-   container sets a stacking context with z-index:50 so the scaled card
-   isn't clipped or buried under the lanes. */
+/* hand-card wrapper: hover only enlarges when the hand is full enough that
+   cards have been shrunk to fit (`.can-enlarge`). The scale factor is set
+   inline via --cp-hover-scale so the hovered card lands at 1.2× the default
+   width regardless of how small the rest are. Origin shifts per row so the
+   scaled card stays inside the canvas — top-row cards anchor their top edge
+   and grow downward, bottom-row cards anchor their bottom edge and grow
+   upward, middle rows grow from center. Hovered card lifts above lanes /
+   right rail via z-index; the hand container has its own stacking context
+   (z-index:50) so the scaled card isn't buried under the lanes. */
 .cp-hand-card {
   position: relative;
   transform-origin: 50% 50%;
   transition: transform 0.2s ease, filter 0.2s ease;
   will-change: transform;
 }
-.cp-hand-card:hover {
-  transform: scale(1.85);
+.cp-hand-card.row-top    { transform-origin: 50% 0%; }
+.cp-hand-card.row-bottom { transform-origin: 50% 100%; }
+.cp-hand-card.can-enlarge:hover {
+  transform: scale(var(--cp-hover-scale, 1.2));
   z-index: 1000;
   filter: drop-shadow(0 22px 32px rgba(0, 0, 0, 0.6));
 }
@@ -837,6 +881,13 @@ html, body, #root {
   box-shadow:
     0 0 0 2px var(--purple-300),
     0 0 48px rgba(var(--purple-glow), 0.7);
+}
+.cp-panel.is-pending {
+  animation: none;
+  box-shadow:
+    0 0 0 3px var(--purple-200, #d4bfff),
+    0 0 56px rgba(var(--purple-glow), 0.85);
+  background: rgba(var(--purple-glow), 0.06);
 }
 
 /* card detail tooltip (hover-driven) */

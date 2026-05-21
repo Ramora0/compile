@@ -98,14 +98,9 @@ const plague4: CardDef = {
         { side: "opp", faceDown: true },
         { reason: "plague-4-opp-delete", forPlayerIdx: ctx.opp },
       );
-      const choice = yield* ctx.promptOption({
-        options: [
-          { id: "yes", label: "Flip Plague 4" },
-          { id: "no", label: "Skip" },
-        ],
-        reason: "plague-4-may-flip",
-      });
-      if (choice === "yes") yield* ctx.flip(ctx.thisInstanceId);
+      if (yield* h.confirm(ctx, "Flip Plague 4", "plague-4-may-flip")) {
+        yield* ctx.flip(ctx.thisInstanceId);
+      }
     },
   },
 };

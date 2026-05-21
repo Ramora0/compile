@@ -83,6 +83,12 @@ export function promptTargets(prompt: Prompt | null, state: RedactedState): Prom
       }
       return { cards, whereByInstance, lines: new Set() };
     }
+    case "play-from-hand":
+      // Drag-drop UI handles target legality directly — no card/line highlights.
+      return EMPTY_TARGETS;
+    case "show-hand":
+      // Display-only prompt; resolved by an ack button.
+      return EMPTY_TARGETS;
   }
 }
 

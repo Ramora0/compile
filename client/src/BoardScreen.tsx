@@ -2,6 +2,7 @@ import { useContext, useEffect, useMemo, useState, type CSSProperties } from "re
 import type {
   LineIdx,
   LogEntry,
+  OpponentPromptSummary,
   PlayerAction,
   PlayerIdx,
   Prompt,
@@ -32,7 +33,7 @@ import { AnimationProvider, useAnchorAnimClass, useCardAnimClass } from "./ui/an
 // action log docked below it in the bottom-right corner.
 // ────────────────────────────────────────────────────────────
 const PAD = 48;
-const HAND_W = 490;
+const HAND_W = 540;
 const RIGHT_W = 320;
 const RAIL_GAP = 20;
 const TOP_OFFSET = 18;
@@ -48,6 +49,33 @@ const LOG_Y = TOP_OFFSET + RIGHT_RAIL_H + RAIL_VERTICAL_GAP;
 const FIELD_COL_W = 140;
 const CARD_STACK_SPACING = 88;
 const CARD_STACK_SPACING_NARROW = 36;
+
+// Hand grid: 2 columns inside HAND_W with 14px horizontal padding and 14px gap.
+// Cards default to 248×352 (aspect 1.4194). Once the hand grows past 6 (>3
+// rows), there isn't enough vertical room for default-size cards, so we shrink
+// width — height and font sizes follow because the card derives every
+// dimension from --cp-card-w (see .cp-card in styles.css).
+const HAND_PAD_X = 14;
+const HAND_PAD_TOP = 16;
+const HAND_PAD_BOTTOM = 18;
+const HAND_GRID_GAP = 14;
+const HAND_CARD_W_DEFAULT = 248;
+const HAND_CARD_ASPECT_H = 1.4194;
+const HAND_CARD_W_MIN = 110;
+
+function handCardWidth(count: number): number {
+  if (count <= 0) return HAND_CARD_W_DEFAULT;
+  const rows = Math.ceil(count / 2);
+  const innerW = HAND_W - HAND_PAD_X * 2;
+  const innerH = HAND_H - HAND_PAD_TOP - HAND_PAD_BOTTOM;
+  const maxByWidth = (innerW - HAND_GRID_GAP) / 2;
+  const maxByHeight =
+    (innerH - (rows - 1) * HAND_GRID_GAP) / rows / HAND_CARD_ASPECT_H;
+  return Math.max(
+    HAND_CARD_W_MIN,
+    Math.min(HAND_CARD_W_DEFAULT, maxByWidth, maxByHeight),
+  );
+}
 
 function gapAfterCard(card: RedactedCard): number {
   if (card.faceDown) return CARD_STACK_SPACING_NARROW;
@@ -81,29 +109,29 @@ function parseCardId(id: string | null | undefined): { el: string; num: number |
   return { el: m[1]!, num: Number(m[2]!) };
 }
 
-function stackValue(stack: RedactedCard[]): number {
-  let total = 0;
-  for (const c of stack) {
-    if (c.faceDown) {
-      total += 2;
-    } else {
-      const v = parseCardId(c.cardId).num ?? 0;
-      total += v;
-    }
-  }
-  return total;
-}
-
-function isCompilable(state: RedactedState, playerIdx: PlayerIdx, lineIdx: LineIdx): boolean {
-  const opp = (1 - playerIdx) as PlayerIdx;
-  const my = stackValue(state.stacks[playerIdx]?.[lineIdx] ?? []);
-  const their = stackValue(state.stacks[opp]?.[lineIdx] ?? []);
-  return my >= 10 && my > their;
+function lineValueFor(state: RedactedState, playerIdx: PlayerIdx, lineIdx: LineIdx): number {
+  return state.lineValues[playerIdx]?.[lineIdx] ?? 0;
 }
 
 function compiledCount(player: RedactedPlayer): number {
   return player.protocols.reduce((n, p) => n + (p.compiled ? 1 : 0), 0);
 }
+
+/**
+ * Why a play is currently legal. Drives drag-drop UI (hand draggability, lane
+ * drop zones, allowed orientation) regardless of whether the underlying play
+ * is a primary turn action or a prompt-driven "Play 1 card" effect (Speed 0,
+ * Darkness 3).
+ *
+ * `dispatch` is the only thing the action-phase and prompt cases differ on —
+ * action plays go through `submit_action`, prompt plays through `prompt_response`.
+ */
+type PlayContext = {
+  mode: "action" | "prompt";
+  allowedLines: ReadonlySet<LineIdx>;
+  orientation: "any" | "face-up" | "face-down";
+  dispatch: (instanceId: string, lineIdx: LineIdx, faceDown: boolean) => void;
+};
 
 /** Wrapper for the central turn-band that exposes itself as the `turn-band`
  *  anchor + applies in-place pulse classes (control-flash, turn-sweep, etc.). */
@@ -144,17 +172,28 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
 
   const [dragInstanceId, setDragInstanceId] = useState<string | null>(null);
   const [pickedDiscards, setPickedDiscards] = useState<string[]>([]);
+  const [pendingCard, setPendingCard] = useState<string | null>(null);
+  const [pendingLine, setPendingLine] = useState<LineIdx | null>(null);
+  const [pendingOption, setPendingOption] = useState<string | null>(null);
   const [logExpanded, setLogExpanded] = useState(false);
+  const [pileView, setPileView] = useState<{
+    title: string;
+    cards: { instanceId: string; cardId: string | null }[];
+    emptyText?: string;
+  } | null>(null);
 
   // Clear any stale drag state on turn flip.
   useEffect(() => {
     setDragInstanceId(null);
   }, [state.turnNumber, state.activePlayerIdx]);
 
-  // Clear discard picks when prompt changes (id null or different promptId).
+  // Clear all pending picks when prompt changes (id null or different promptId).
   const promptId = state.pendingPrompt?.promptId ?? null;
   useEffect(() => {
     setPickedDiscards([]);
+    setPendingCard(null);
+    setPendingLine(null);
+    setPendingOption(null);
   }, [promptId]);
 
   const youPlayer = state.players[youIdx];
@@ -186,25 +225,70 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
     isMyTurn;
 
   const compilable: LineIdx[] = useMemo(() => {
-    if (state.phase !== "check-compile" || state.winnerIdx !== null) return [];
     if (!isMyTurn) return [];
-    return ([0, 1, 2] as LineIdx[]).filter((l) => isCompilable(state, youIdx, l));
-  }, [state, youIdx, isMyTurn]);
+    return state.compilableLines as LineIdx[];
+  }, [state.compilableLines, isMyTurn]);
 
   const draggedCard = dragInstanceId
     ? youHand.find((c) => c.instanceId === dragInstanceId) ?? null
     : null;
   const draggedProtocol = draggedCard ? getCard(draggedCard.cardId)?.protocol ?? null : null;
 
-  const play = (instanceId: string, lineIdx: LineIdx, faceDown: boolean) => {
-    if (!canAct) return;
-    const action: PlayerAction = { kind: "play", instanceId, lineIdx, faceDown };
-    try {
-      send.submitAction(client, gameId, action);
-    } catch (e) {
-      onNotify((e as Error).message, "error");
+  // ── prompt-driven selection ──────────────────────────────────
+  // Only surface prompt targets when the prompt is for me; otherwise the
+  // opponent's prompt would highlight cards on my screen with no way to act.
+  const pendingPrompt =
+    state.pendingPrompt && state.pendingPrompt.forPlayerIdx === myIdx
+      ? state.pendingPrompt
+      : null;
+
+  // A `play-from-hand` prompt borrows the normal play UI (drag-drop with
+  // face-up/face-down lane drop zones) but routes the play through
+  // prompt_response and obeys the prompt's allowedLines + orientation.
+  const playPrompt =
+    pendingPrompt && pendingPrompt.kind === "play-from-hand" ? pendingPrompt : null;
+
+  const showHandPrompt =
+    pendingPrompt && pendingPrompt.kind === "show-hand" ? pendingPrompt : null;
+
+  const playContext: PlayContext | null = useMemo(() => {
+    if (canAct) {
+      return {
+        mode: "action",
+        allowedLines: new Set<LineIdx>([0, 1, 2]),
+        orientation: "any",
+        dispatch: (instanceId, lineIdx, faceDown) => {
+          const action: PlayerAction = { kind: "play", instanceId, lineIdx, faceDown };
+          try {
+            send.submitAction(client, gameId, action);
+          } catch (e) {
+            onNotify((e as Error).message, "error");
+          }
+        },
+      };
     }
-  };
+    if (playPrompt) {
+      return {
+        mode: "prompt",
+        allowedLines: new Set<LineIdx>(playPrompt.allowedLines),
+        orientation: playPrompt.orientation,
+        dispatch: (instanceId, lineIdx, faceDown) => {
+          try {
+            send.promptResponse(client, gameId, {
+              kind: "play-from-hand-chosen",
+              promptId: playPrompt.promptId,
+              instanceId,
+              lineIdx,
+              faceDown,
+            });
+          } catch (e) {
+            onNotify((e as Error).message, "error");
+          }
+        },
+      };
+    }
+    return null;
+  }, [canAct, playPrompt, client, gameId, onNotify]);
 
   const refresh = () => {
     if (!canAct) return;
@@ -214,14 +298,6 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
       onNotify((e as Error).message, "error");
     }
   };
-
-  // ── prompt-driven selection ──────────────────────────────────
-  // Only surface prompt targets when the prompt is for me; otherwise the
-  // opponent's prompt would highlight cards on my screen with no way to act.
-  const pendingPrompt =
-    state.pendingPrompt && state.pendingPrompt.forPlayerIdx === myIdx
-      ? state.pendingPrompt
-      : null;
   const targets = useMemo<PromptTargets>(
     () => promptTargets(pendingPrompt, state),
     [pendingPrompt, state],
@@ -239,49 +315,60 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
     if (!pendingPrompt) return;
     if (!targets.cards.has(instanceId)) return;
     if (pendingPrompt.kind === "choose-card") {
-      sendPromptResponse({
-        kind: "card-chosen",
-        promptId: pendingPrompt.promptId,
-        instanceId,
-      });
+      setPendingCard((cur) => (cur === instanceId ? null : instanceId));
     } else if (pendingPrompt.kind === "discard-selection") {
-      setPickedDiscards((cur) =>
-        cur.includes(instanceId)
-          ? cur.filter((x) => x !== instanceId)
-          : cur.length >= pendingPrompt.count
-            ? cur
-            : [...cur, instanceId],
-      );
+      setPickedDiscards((cur) => {
+        if (cur.includes(instanceId)) return cur.filter((x) => x !== instanceId);
+        if (cur.length >= pendingPrompt.count) {
+          return [...cur.slice(1), instanceId];
+        }
+        return [...cur, instanceId];
+      });
     }
   };
 
   const handleLinePick = (lineIdx: LineIdx) => {
     if (!pendingPrompt || pendingPrompt.kind !== "choose-line") return;
     if (!targets.lines.has(lineIdx)) return;
-    sendPromptResponse({
-      kind: "line-chosen",
-      promptId: pendingPrompt.promptId,
-      lineIdx,
-    });
+    setPendingLine((cur) => (cur === lineIdx ? null : lineIdx));
   };
 
   const handleOptionPick = (optionId: string) => {
     if (!pendingPrompt || pendingPrompt.kind !== "choose-option") return;
-    sendPromptResponse({
-      kind: "option-chosen",
-      promptId: pendingPrompt.promptId,
-      optionId,
-    });
+    setPendingOption((cur) => (cur === optionId ? null : optionId));
   };
 
-  const confirmDiscards = () => {
-    if (!pendingPrompt || pendingPrompt.kind !== "discard-selection") return;
-    if (pickedDiscards.length !== pendingPrompt.count) return;
-    sendPromptResponse({
-      kind: "discard-chosen",
-      promptId: pendingPrompt.promptId,
-      instanceIds: pickedDiscards,
-    });
+  const confirmPick = () => {
+    if (!pendingPrompt) return;
+    if (pendingPrompt.kind === "choose-card") {
+      if (!pendingCard) return;
+      sendPromptResponse({
+        kind: "card-chosen",
+        promptId: pendingPrompt.promptId,
+        instanceId: pendingCard,
+      });
+    } else if (pendingPrompt.kind === "choose-line") {
+      if (pendingLine === null) return;
+      sendPromptResponse({
+        kind: "line-chosen",
+        promptId: pendingPrompt.promptId,
+        lineIdx: pendingLine,
+      });
+    } else if (pendingPrompt.kind === "choose-option") {
+      if (!pendingOption) return;
+      sendPromptResponse({
+        kind: "option-chosen",
+        promptId: pendingPrompt.promptId,
+        optionId: pendingOption,
+      });
+    } else if (pendingPrompt.kind === "discard-selection") {
+      if (pickedDiscards.length !== pendingPrompt.count) return;
+      sendPromptResponse({
+        kind: "discard-chosen",
+        promptId: pendingPrompt.promptId,
+        instanceIds: pickedDiscards,
+      });
+    }
   };
 
   const skipPrompt = () => {
@@ -293,7 +380,16 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
     });
   };
 
-  const pickedSet = useMemo(() => new Set(pickedDiscards), [pickedDiscards]);
+  const ackShowHand = () => {
+    if (!showHandPrompt) return;
+    sendPromptResponse({ kind: "ack", promptId: showHandPrompt.promptId });
+  };
+
+  const pickedSet = useMemo(() => {
+    const s = new Set(pickedDiscards);
+    if (pendingCard) s.add(pendingCard);
+    return s;
+  }, [pickedDiscards, pendingCard]);
 
   return (
     <Stage>
@@ -307,14 +403,14 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
         state={state}
         youIdx={youIdx}
         oppIdx={oppIdx}
-        canAct={canAct}
+        playContext={playContext}
         dragInstanceId={dragInstanceId}
         draggedProtocol={draggedProtocol}
         compilable={compilable}
-        onPlay={play}
         onNotify={onNotify}
         targets={targets}
         pickedSet={pickedSet}
+        pendingLine={pendingLine}
         onCardPick={handleCardPick}
         onLinePick={handleLinePick}
       />
@@ -328,11 +424,12 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
         oppHandCount={oppHand.length}
         canAct={canAct}
         onRefresh={refresh}
+        onViewPile={setPileView}
       />
 
       <HandStrip
         hand={sortedYouHand}
-        canAct={canAct}
+        canDrag={playContext !== null}
         dragInstanceId={dragInstanceId}
         onDragStart={setDragInstanceId}
         onDragEnd={() => setDragInstanceId(null)}
@@ -359,25 +456,52 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
           />
         )}
 
-      {pendingPrompt && (
+      {pendingPrompt && !showHandPrompt && (
         <PromptBanner
           prompt={pendingPrompt}
           targets={targets}
           pickedCount={pickedDiscards.length}
+          pendingCard={pendingCard}
+          pendingLine={pendingLine}
+          pendingOption={pendingOption}
           onOption={handleOptionPick}
-          onConfirmDiscards={confirmDiscards}
+          onConfirm={confirmPick}
           onSkip={skipPrompt}
         />
       )}
 
-      {state.winnerIdx === null && !isMyTurn && !pendingPrompt && (
-        <WaitingOverlay oppIdx={oppIdx} phase={state.phase} />
-      )}
+      {state.winnerIdx === null &&
+        !pendingPrompt &&
+        (state.opponentPromptSummary !== null || !isMyTurn) && (
+          <WaitingOverlay
+            oppIdx={oppIdx}
+            summary={state.opponentPromptSummary}
+            phase={state.phase}
+          />
+        )}
 
       {state.winnerIdx !== null && (
         <GameOverOverlay
           winnerIdx={state.winnerIdx}
           players={state.players}
+        />
+      )}
+
+      {showHandPrompt && (
+        <CardListOverlay
+          title={`PLAYER ${showHandPrompt.ownerIdx + 1} HAND REVEALED`}
+          cards={showHandPrompt.cards}
+          onClose={ackShowHand}
+        />
+      )}
+
+      {pileView && (
+        <CardListOverlay
+          title={pileView.title}
+          cards={pileView.cards}
+          onClose={() => setPileView(null)}
+          dismissOnBackdrop
+          emptyText={pileView.emptyText ?? "EMPTY"}
         />
       )}
 
@@ -391,13 +515,75 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
 // Waiting overlay (shown when it's the opponent's turn and no prompt is for me)
 // ────────────────────────────────────────────────────────────
 
-function WaitingOverlay({ oppIdx, phase }: { oppIdx: PlayerIdx; phase: RedactedState["phase"] }) {
-  const label =
-    phase === "check-compile"
-      ? "choosing a line to compile"
-      : phase === "action"
-        ? "taking their turn"
-        : "thinking";
+/**
+ * Map a prompt's `reason` code (e.g. "delete", "shift-to", "darkness-3") to
+ * a short verb phrase used in "choosing a card to <verb>" / "picking a lane
+ * to <verb>". Returns null if the reason doesn't hint at an action, in which
+ * case the caller falls back to a generic description.
+ */
+function reasonVerb(reason: string): string | null {
+  if (reason.startsWith("flip")) return "flip";
+  if (reason.startsWith("delete")) return "delete";
+  if (reason.startsWith("return")) return "return";
+  if (reason.startsWith("shift")) return "shift";
+  if (reason.startsWith("reveal")) return "reveal";
+  return null;
+}
+
+/**
+ * Human-readable description of what the opponent is currently being asked to
+ * do. Used by the wait overlay and the right-rail status label. Falls back to
+ * a phase-based label when there is no active prompt for them.
+ */
+function describeOpponentActivity(
+  summary: OpponentPromptSummary | null,
+  phase: RedactedState["phase"],
+): string {
+  if (summary) {
+    switch (summary.kind) {
+      case "choose-card": {
+        const verb = reasonVerb(summary.reason);
+        return verb ? `choosing a card to ${verb}` : "choosing a card";
+      }
+      case "choose-line": {
+        if (summary.reason === "shift-to") return "picking a lane to shift to";
+        if (summary.reason.startsWith("swap-protocol")) return "choosing protocols to swap";
+        return "choosing a lane";
+      }
+      case "choose-option":
+        return "choosing an option";
+      case "discard-selection": {
+        const n = summary.count ?? 0;
+        const plural = n === 1 ? "" : "s";
+        if (summary.reason === "check-cache") {
+          return `discarding ${n} card${plural} (over the 5-card limit)`;
+        }
+        return `discarding ${n} card${plural}`;
+      }
+      case "play-from-hand":
+        return "playing a card from their hand";
+      case "show-hand":
+        return "reviewing your hand";
+    }
+  }
+  if (phase === "check-compile") return "choosing a line to compile";
+  if (phase === "action") return "taking their turn";
+  if (phase === "check-cache") return "wrapping up their turn";
+  if (phase === "end") return "ending their turn";
+  if (phase === "start" || phase === "check-control") return "starting their turn";
+  return "thinking";
+}
+
+function WaitingOverlay({
+  oppIdx,
+  summary,
+  phase,
+}: {
+  oppIdx: PlayerIdx;
+  summary: OpponentPromptSummary | null;
+  phase: RedactedState["phase"];
+}) {
+  const label = describeOpponentActivity(summary, phase);
   return (
     <div
       className="mono"
@@ -417,6 +603,7 @@ function WaitingOverlay({ oppIdx, phase }: { oppIdx: PlayerIdx; phase: RedactedS
         alignItems: "center",
         gap: 10,
         pointerEvents: "none",
+        maxWidth: 420,
       }}
     >
       <span
@@ -426,9 +613,12 @@ function WaitingOverlay({ oppIdx, phase }: { oppIdx: PlayerIdx; phase: RedactedS
           borderRadius: "50%",
           background: "var(--purple-400, #b693ff)",
           display: "inline-block",
+          flexShrink: 0,
         }}
       />
-      PLAYER {oppIdx + 1} IS {label.toUpperCase()}…
+      <span>
+        WAITING ON PLAYER {oppIdx + 1} — {label.toUpperCase()}…
+      </span>
     </div>
   );
 }
@@ -441,28 +631,28 @@ function LanesGrid({
   state,
   youIdx,
   oppIdx,
-  canAct,
+  playContext,
   dragInstanceId,
   draggedProtocol,
   compilable,
-  onPlay,
   onNotify,
   targets,
   pickedSet,
+  pendingLine,
   onCardPick,
   onLinePick,
 }: {
   state: RedactedState;
   youIdx: PlayerIdx;
   oppIdx: PlayerIdx;
-  canAct: boolean;
+  playContext: PlayContext | null;
   dragInstanceId: string | null;
   draggedProtocol: string | null;
   compilable: LineIdx[];
-  onPlay: (instanceId: string, lineIdx: LineIdx, faceDown: boolean) => void;
   onNotify: NotifyFn;
   targets: PromptTargets;
   pickedSet: Set<string>;
+  pendingLine: LineIdx | null;
   onCardPick: (instanceId: string) => void;
   onLinePick: (lineIdx: LineIdx) => void;
 }) {
@@ -488,14 +678,14 @@ function LanesGrid({
             youIdx={youIdx}
             oppIdx={oppIdx}
             lineIdx={lineIdx}
-            canAct={canAct}
+            playContext={playContext}
             dragInstanceId={dragInstanceId}
             draggedProtocol={draggedProtocol}
             compilable={compilable.includes(lineIdx)}
-            onPlay={onPlay}
             onNotify={onNotify}
             targets={targets}
             pickedSet={pickedSet}
+            isPending={pendingLine === lineIdx}
             onCardPick={onCardPick}
             onLinePick={onLinePick}
           />
@@ -510,14 +700,14 @@ function Lane({
   youIdx,
   oppIdx,
   lineIdx,
-  canAct,
+  playContext,
   dragInstanceId,
   draggedProtocol,
   compilable,
-  onPlay,
   onNotify,
   targets,
   pickedSet,
+  isPending,
   onCardPick,
   onLinePick,
 }: {
@@ -525,14 +715,14 @@ function Lane({
   youIdx: PlayerIdx;
   oppIdx: PlayerIdx;
   lineIdx: LineIdx;
-  canAct: boolean;
+  playContext: PlayContext | null;
   dragInstanceId: string | null;
   draggedProtocol: string | null;
   compilable: boolean;
-  onPlay: (instanceId: string, lineIdx: LineIdx, faceDown: boolean) => void;
   onNotify: NotifyFn;
   targets: PromptTargets;
   pickedSet: Set<string>;
+  isPending: boolean;
   onCardPick: (instanceId: string) => void;
   onLinePick: (lineIdx: LineIdx) => void;
 }) {
@@ -545,8 +735,8 @@ function Lane({
   const youEl = youSlot?.protocol ?? "void";
   const oppEl = oppSlot?.protocol ?? "void";
 
-  const youCompile = stackValue(youStack);
-  const oppCompile = stackValue(oppStack);
+  const youCompile = lineValueFor(state, youIdx, lineIdx);
+  const oppCompile = lineValueFor(state, oppIdx, lineIdx);
 
   const youStackOffsets = stackOffsets(youStack);
   const oppStackOffsets = stackOffsets(oppStack);
@@ -554,14 +744,24 @@ function Lane({
   const youCompiled = !!youSlot?.compiled;
   const oppCompiled = !!oppSlot?.compiled;
 
-  const isDragging = canAct && dragInstanceId !== null;
-  const faceUpLegal = isDragging && draggedProtocol !== null && draggedProtocol === youSlot?.protocol;
+  const laneAllowed = playContext?.allowedLines.has(lineIdx) ?? false;
+  const isDragging = playContext !== null && dragInstanceId !== null && laneAllowed;
+  const orientation = playContext?.orientation ?? "any";
+  const showFaceUpZone = isDragging && orientation !== "face-down";
+  const showFaceDownZone = isDragging && orientation !== "face-up";
+  // Server-authoritative drop legality: validatePlayCard already encodes
+  // protocol-match, play-anywhere overrides (Spirit 1 top), and play-restriction
+  // overrides (Apathy etc.). The client just reads the precomputed answer.
+  const dragOptions = dragInstanceId ? state.playOptions[dragInstanceId] : undefined;
+  const faceUpLegal = showFaceUpZone && (dragOptions?.faceUpLines.includes(lineIdx) ?? false);
+  const faceDownLegal =
+    showFaceDownZone && (dragOptions?.faceDownLines.includes(lineIdx) ?? false);
   const laneProtocolLabel = youSlot?.protocol?.toUpperCase() ?? "—";
   const draggedProtocolLabel = draggedProtocol?.toUpperCase() ?? "?";
 
   return (
     <div
-      className={`cp-panel${lineIsTarget ? " is-target" : ""}`}
+      className={`cp-panel${lineIsTarget ? " is-target" : ""}${isPending ? " is-pending" : ""}`}
       onClick={lineIsTarget ? () => onLinePick(lineIdx) : undefined}
       style={{
         position: "relative",
@@ -742,29 +942,38 @@ function Lane({
 
         {isDragging && (
           <div className="cp-drop-zones">
-            <PlayDropZone
-              legal={faceUpLegal}
-              label="PLAY FACE-UP"
-              hint={faceUpLegal ? laneProtocolLabel : `NEED ${draggedProtocolLabel}`}
-              onAccept={() => {
-                if (dragInstanceId) onPlay(dragInstanceId, lineIdx, false);
-              }}
-              onReject={() =>
-                onNotify(
-                  `Can't play face-up in line ${lineIdx + 1}: this card is ${draggedProtocolLabel}, lane is ${laneProtocolLabel}.`,
-                  "error",
-                )
-              }
-            />
-            <PlayDropZone
-              legal={true}
-              label="PLAY FACE-DOWN"
-              hint="ANY LANE · VALUE 2"
-              onAccept={() => {
-                if (dragInstanceId) onPlay(dragInstanceId, lineIdx, true);
-              }}
-              onReject={() => {}}
-            />
+            {showFaceUpZone && (
+              <PlayDropZone
+                legal={faceUpLegal}
+                label="PLAY FACE-UP"
+                hint={faceUpLegal ? laneProtocolLabel : `NEED ${draggedProtocolLabel}`}
+                onAccept={() => {
+                  if (dragInstanceId) playContext?.dispatch(dragInstanceId, lineIdx, false);
+                }}
+                onReject={() =>
+                  onNotify(
+                    `Can't play face-up in line ${lineIdx + 1}: this card is ${draggedProtocolLabel}, lane is ${laneProtocolLabel}.`,
+                    "error",
+                  )
+                }
+              />
+            )}
+            {showFaceDownZone && (
+              <PlayDropZone
+                legal={faceDownLegal}
+                label="PLAY FACE-DOWN"
+                hint={faceDownLegal ? "FACE-DOWN" : "FORBIDDEN HERE"}
+                onAccept={() => {
+                  if (dragInstanceId) playContext?.dispatch(dragInstanceId, lineIdx, true);
+                }}
+                onReject={() =>
+                  onNotify(
+                    `Can't play face-down in line ${lineIdx + 1}: blocked by an active rule.`,
+                    "error",
+                  )
+                }
+              />
+            )}
           </div>
         )}
       </div>
@@ -1417,6 +1626,7 @@ function RightRail({
   oppHandCount,
   canAct,
   onRefresh,
+  onViewPile,
 }: {
   state: RedactedState;
   youIdx: PlayerIdx;
@@ -1426,6 +1636,11 @@ function RightRail({
   oppHandCount: number;
   canAct: boolean;
   onRefresh: () => void;
+  onViewPile: (pile: {
+    title: string;
+    cards: { instanceId: string; cardId: string | null }[];
+    emptyText?: string;
+  }) => void;
 }) {
   const youCompiled = compiledCount(youPlayer);
   const oppCompiled = compiledCount(oppPlayer);
@@ -1439,26 +1654,26 @@ function RightRail({
   const youLabel = "YOU";
   const oppLabel = `OPPONENT`;
 
+  // When the opponent has a pending prompt (or it's just their turn), the
+  // status row should describe what we're waiting on, not just "OPP'S TURN".
+  const waitingOnOpp = !gameOver && (state.opponentPromptSummary !== null || !isMyTurn);
   const statusTone: "you" | "opp" | "neutral" = gameOver
     ? "neutral"
-    : isMyTurn
-      ? "you"
-      : "opp";
+    : waitingOnOpp
+      ? "opp"
+      : "you";
+  const oppActivity = describeOpponentActivity(state.opponentPromptSummary, state.phase);
   const statusLabel = gameOver
     ? "GAME OVER"
     : canAct
       ? "YOUR TURN"
-      : isMyTurn
+      : !waitingOnOpp
         ? state.pendingPrompt
           ? "YOUR INPUT NEEDED"
           : state.phase === "check-compile"
             ? "YOUR COMPILE PHASE"
             : "YOUR TURN"
-        : state.pendingPrompt && state.pendingPrompt.forPlayerIdx === oppIdx
-          ? `${oppLabel} — INPUT NEEDED`
-          : state.phase === "check-compile"
-            ? `${oppLabel} — COMPILE PHASE`
-            : `${oppLabel}'S TURN`;
+        : `${oppLabel} — ${oppActivity.toUpperCase()}`;
 
   return (
     <div
@@ -1557,8 +1772,24 @@ function RightRail({
         <OppHandBackwards count={oppHandCount} playerIdx={oppIdx} />
 
         <div className="row gap-3" style={{ alignItems: "flex-end" }}>
-          <ResourceTile label="DECK" count={oppPlayer.deckCount} kind="deck" playerIdx={oppIdx} />
-          <ResourceTile label="DISCARD" count={oppPlayer.trash.length} kind="discard" playerIdx={oppIdx} />
+          <ResourceTile
+            label="DECK"
+            count={Array.isArray(oppPlayer.deck) ? oppPlayer.deck.length : oppPlayer.deck.count}
+            kind="deck"
+            playerIdx={oppIdx}
+          />
+          <ResourceTile
+            label="DISCARD"
+            count={oppPlayer.trash.length}
+            kind="discard"
+            playerIdx={oppIdx}
+            onClick={() =>
+              onViewPile({
+                title: `PLAYER ${oppIdx + 1} DISCARD`,
+                cards: oppPlayer.trash,
+              })
+            }
+          />
         </div>
       </div>
 
@@ -1689,8 +1920,33 @@ function RightRail({
         }}
       >
         <div className="row gap-3" style={{ alignItems: "flex-end" }}>
-          <ResourceTile label="DECK" count={youPlayer.deckCount} kind="deck" playerIdx={youIdx} />
-          <ResourceTile label="DISCARD" count={youPlayer.trash.length} kind="discard" playerIdx={youIdx} />
+          <ResourceTile
+            label="DECK"
+            count={Array.isArray(youPlayer.deck) ? youPlayer.deck.length : youPlayer.deck.count}
+            kind="deck"
+            playerIdx={youIdx}
+            onClick={
+              Array.isArray(youPlayer.deck)
+                ? () =>
+                    onViewPile({
+                      title: "YOUR DECK",
+                      cards: Array.isArray(youPlayer.deck) ? youPlayer.deck : [],
+                    })
+                : undefined
+            }
+          />
+          <ResourceTile
+            label="DISCARD"
+            count={youPlayer.trash.length}
+            kind="discard"
+            playerIdx={youIdx}
+            onClick={() =>
+              onViewPile({
+                title: "YOUR DISCARD",
+                cards: youPlayer.trash,
+              })
+            }
+          />
         </div>
 
         <div className="row gap-3 middle" style={{ alignItems: "center" }}>
@@ -1795,11 +2051,13 @@ function ResourceTile({
   count,
   kind,
   playerIdx,
+  onClick,
 }: {
   label: string;
   count: number;
   kind: "deck" | "discard";
   playerIdx: PlayerIdx;
+  onClick?: () => void;
 }) {
   const anchorId = `${kind}:${playerIdx}`;
   const anchorRef = useAnchor(anchorId);
@@ -1810,12 +2068,14 @@ function ResourceTile({
         ref={anchorRef as React.RefCallback<HTMLDivElement>}
         data-anim-anchor={anchorId}
         className={animClass}
+        onClick={onClick}
         style={{
           position: "relative",
           width: 96,
           height: 134,
           borderRadius: 8,
           overflow: "hidden",
+          cursor: onClick ? "pointer" : "default",
           ...(kind === "deck"
             ? {
                 background:
@@ -1914,7 +2174,7 @@ function OppHandBackwards({ count, playerIdx }: { count: number; playerIdx: Play
 
 function HandStrip({
   hand,
-  canAct,
+  canDrag,
   dragInstanceId,
   onDragStart,
   onDragEnd,
@@ -1924,7 +2184,7 @@ function HandStrip({
   youIdx,
 }: {
   hand: RedactedCard[];
-  canAct: boolean;
+  canDrag: boolean;
   dragInstanceId: string | null;
   onDragStart: (instanceId: string) => void;
   onDragEnd: () => void;
@@ -1934,6 +2194,14 @@ function HandStrip({
   youIdx: PlayerIdx;
 }) {
   const zoneAnchor = useAnchor(`hand-zone:${youIdx}`);
+  const cardWidth = handCardWidth(hand.length);
+  // Hover enlargement only kicks in when cards have been shrunk to fit (>6 in
+  // hand). Scale always lands on 1.2× the default card width so the hovered
+  // card has a consistent visual size regardless of hand count.
+  const enlargeOnHover = hand.length > 6;
+  const hoverScale = enlargeOnHover
+    ? (HAND_CARD_W_DEFAULT * 1.2) / cardWidth
+    : 1;
   return (
     <div
       ref={zoneAnchor as React.RefCallback<HTMLDivElement>}
@@ -1946,7 +2214,7 @@ function HandStrip({
         height: HAND_H,
         borderRight: "1px solid var(--line-2)",
         background: "linear-gradient(90deg, transparent, rgba(13,11,34,0.7))",
-        padding: "16px 14px 18px",
+        padding: `${HAND_PAD_TOP}px ${HAND_PAD_X}px ${HAND_PAD_BOTTOM}px`,
         overflow: "visible",
         zIndex: 50,
       }}
@@ -1956,7 +2224,7 @@ function HandStrip({
           position: "relative",
           display: "grid",
           gridTemplateColumns: "1fr 1fr",
-          gap: 14,
+          gap: HAND_GRID_GAP,
           alignItems: "start",
           justifyItems: "center",
         }}
@@ -1975,19 +2243,27 @@ function HandStrip({
             HAND EMPTY
           </div>
         )}
-        {hand.map((c) => {
+        {hand.map((c, i) => {
           const selectable = targets.cards.has(c.instanceId);
+          const totalRows = Math.max(1, Math.ceil(hand.length / 2));
+          const row = Math.floor(i / 2);
+          const rowKind: "top" | "bottom" | "middle" =
+            row === 0 ? "top" : row === totalRows - 1 ? "bottom" : "middle";
           return (
             <HandCard
               key={c.instanceId}
               card={c}
-              draggable={canAct}
+              draggable={canDrag}
               dragging={dragInstanceId === c.instanceId}
               onDragStart={onDragStart}
               onDragEnd={onDragEnd}
               selectable={selectable}
               selected={pickedSet.has(c.instanceId)}
               onPick={selectable ? onCardPick : undefined}
+              rowKind={rowKind}
+              width={cardWidth}
+              enlargeOnHover={enlargeOnHover}
+              hoverScale={hoverScale}
             />
           );
         })}
@@ -2005,6 +2281,10 @@ function HandCard({
   selectable,
   selected,
   onPick,
+  rowKind,
+  width,
+  enlargeOnHover,
+  hoverScale,
 }: {
   card: RedactedCard;
   draggable: boolean;
@@ -2014,16 +2294,21 @@ function HandCard({
   selectable?: boolean;
   selected?: boolean;
   onPick?: (instanceId: string) => void;
+  rowKind: "top" | "bottom" | "middle";
+  width: number;
+  enlargeOnHover: boolean;
+  hoverScale: number;
 }) {
   const { setHovered } = useContext(HoverCtx);
   const { el, num } = parseCardId(card.cardId);
   const info = getCard(card.cardId);
   const anchorRef = useAnchor(`hand:${card.instanceId}`);
   const animClass = useCardAnimClass(card.instanceId);
-  const classes = ["cp-hand-card"];
+  const classes = ["cp-hand-card", `row-${rowKind}`];
   if (dragging) classes.push("dragging");
   if (selectable) classes.push("is-selectable");
   if (selected) classes.push("is-selected");
+  if (enlargeOnHover) classes.push("can-enlarge");
   if (animClass) classes.push(animClass);
 
   return (
@@ -2033,6 +2318,9 @@ function HandCard({
       className={classes.join(" ")}
       style={{
         cursor: selectable ? "pointer" : draggable ? "grab" : "default",
+        ...(enlargeOnHover
+          ? { ["--cp-hover-scale" as never]: String(hoverScale) }
+          : {}),
       }}
       onMouseEnter={() => {
         if (card.cardId) setHovered(card.cardId);
@@ -2051,6 +2339,7 @@ function HandCard({
         top={info?.top}
         middle={info?.middle}
         bottom={info?.bottom}
+        width={width}
         className={`${dragging ? "dragging" : ""}${selectable ? " is-selectable" : ""}${selected ? " is-selected" : ""}`}
         draggable={draggable && !selectable}
         onDragStart={(e) => {
@@ -2113,15 +2402,21 @@ function PromptBanner({
   prompt,
   targets,
   pickedCount,
+  pendingCard,
+  pendingLine,
+  pendingOption,
   onOption,
-  onConfirmDiscards,
+  onConfirm,
   onSkip,
 }: {
   prompt: Prompt;
   targets: PromptTargets;
   pickedCount: number;
+  pendingCard: string | null;
+  pendingLine: LineIdx | null;
+  pendingOption: string | null;
   onOption: (optionId: string) => void;
-  onConfirmDiscards: () => void;
+  onConfirm: () => void;
   onSkip: () => void;
 }) {
   const targetCount =
@@ -2130,22 +2425,47 @@ function PromptBanner({
   let instruction = "";
   switch (prompt.kind) {
     case "choose-card":
-      instruction = "Click a highlighted card";
+      instruction = pendingCard ? "Confirm your pick or click another card" : "Click a highlighted card";
       break;
     case "choose-line":
-      instruction = "Click a highlighted line";
+      instruction = pendingLine !== null ? "Confirm your pick or click another line" : "Click a highlighted line";
       break;
     case "choose-option":
-      instruction = "Pick an option";
+      instruction = pendingOption ? "Confirm your pick or choose another option" : "Pick an option";
       break;
     case "discard-selection":
       instruction = `Select ${prompt.count} card${prompt.count === 1 ? "" : "s"} from your hand`;
       break;
+    case "play-from-hand": {
+      const parts: string[] = [];
+      if (prompt.orientation === "face-down") parts.push("face-down");
+      else if (prompt.orientation === "face-up") parts.push("face-up");
+      const lineHint =
+        prompt.allowedLines.length < 3
+          ? ` to ${prompt.allowedLines.map((l) => `L${l + 1}`).join(" or ")}`
+          : "";
+      instruction = `Drag a card from your hand onto a lane to play${
+        parts.length > 0 ? ` ${parts.join(", ")}` : ""
+      }${lineHint}`;
+      break;
+    }
+    case "show-hand":
+      // Handled by ShowOppHandModal — banner is suppressed in this case.
+      instruction = "";
+      break;
   }
 
   const showSkip = prompt.kind === "choose-card" && prompt.optional;
-  const showConfirm = prompt.kind === "discard-selection";
-  const confirmEnabled = prompt.kind === "discard-selection" && pickedCount === prompt.count;
+  const showConfirm =
+    prompt.kind === "choose-card" ||
+    prompt.kind === "choose-line" ||
+    prompt.kind === "choose-option" ||
+    prompt.kind === "discard-selection";
+  const confirmEnabled =
+    (prompt.kind === "choose-card" && pendingCard !== null) ||
+    (prompt.kind === "choose-line" && pendingLine !== null) ||
+    (prompt.kind === "choose-option" && pendingOption !== null) ||
+    (prompt.kind === "discard-selection" && pickedCount === prompt.count);
 
   return (
     <div className="cp-prompt-banner">
@@ -2172,7 +2492,7 @@ function PromptBanner({
           {prompt.options.map((o) => (
             <button
               key={o.id}
-              className="cp-btn primary"
+              className={`cp-btn ${pendingOption === o.id ? "primary is-selected" : "ghost"}`}
               onClick={() => onOption(o.id)}
             >
               {o.label}
@@ -2192,7 +2512,7 @@ function PromptBanner({
             <button
               className="cp-btn primary"
               disabled={!confirmEnabled}
-              onClick={onConfirmDiscards}
+              onClick={onConfirm}
             >
               CONFIRM
             </button>
@@ -2243,6 +2563,99 @@ function GameOverOverlay({
         </div>
       </div>
     </ModalOverlay>
+  );
+}
+
+function CardListOverlay({
+  title,
+  cards,
+  onClose,
+  dismissOnBackdrop = false,
+  emptyText = "EMPTY",
+}: {
+  title: string;
+  cards: { instanceId: string; cardId: string | null }[];
+  onClose: () => void;
+  /** Whether clicking the dimmed backdrop dismisses. Off for engine-driven prompts. */
+  dismissOnBackdrop?: boolean;
+  emptyText?: string;
+}) {
+  return (
+    <div
+      onClick={dismissOnBackdrop ? onClose : undefined}
+      style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 90,
+        background: "rgba(6,6,26,0.78)",
+        backdropFilter: "blur(8px)",
+        display: "grid",
+        placeItems: "center",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="cp-panel"
+        style={{
+          minWidth: 480,
+          maxWidth: 1280,
+          padding: 28,
+          boxShadow: "0 0 0 1px var(--purple-500) inset, 0 20px 60px rgba(0,0,0,0.6)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 16,
+        }}
+      >
+        <h2 style={{ ...modalTitle, fontSize: 18, color: "var(--purple-300)" }}>
+          ◆ {title}
+        </h2>
+        {cards.length === 0 ? (
+          <div
+            className="mono"
+            style={{
+              padding: 40,
+              textAlign: "center",
+              color: "var(--ink-faint)",
+              letterSpacing: "0.2em",
+              fontSize: 12,
+            }}
+          >
+            {emptyText}
+          </div>
+        ) : (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 14,
+              justifyContent: "center",
+              padding: "8px 0",
+            }}
+          >
+            {cards.map((c) => {
+              const { el, num } = parseCardId(c.cardId);
+              const info = getCard(c.cardId);
+              return (
+                <Card
+                  key={c.instanceId}
+                  el={el}
+                  num={num}
+                  top={info?.top}
+                  middle={info?.middle}
+                  bottom={info?.bottom}
+                  width={180}
+                />
+              );
+            })}
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "center" }}>
+          <button className="cp-btn primary" onClick={onClose}>
+            DONE
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

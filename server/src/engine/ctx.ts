@@ -28,7 +28,9 @@ import type {
   DiscardSelectionPrompt,
   Op,
   OpResult,
+  PlayFromHandPrompt,
   PromptResponse,
+  ShowHandPrompt,
 } from "./ops.js";
 
 /** Reading helpers — synchronous, do not yield Ops. */
@@ -87,6 +89,22 @@ export interface CardCtxPrompts {
     reason: string;
     forPlayerIdx?: PlayerIdx;
   }): Generator<Op, string[], OpResult>;
+  promptPlay(opts: {
+    reason: string;
+    allowedLines?: LineIdx[];
+    orientation?: "any" | "face-up" | "face-down";
+    forPlayerIdx?: PlayerIdx;
+  }): Generator<
+    Op,
+    { instanceId: string; lineIdx: LineIdx; faceDown: boolean } | null,
+    OpResult
+  >;
+  promptShowHand(opts: {
+    reason: string;
+    ownerIdx: PlayerIdx;
+    cards: { instanceId: string; cardId: string }[];
+    forPlayerIdx?: PlayerIdx;
+  }): Generator<Op, void, OpResult>;
 }
 
 export interface CardCtxFull extends CardCtx, CardCtxReads, CardCtxOps, CardCtxPrompts {}
@@ -236,6 +254,41 @@ export function createCardCtx(state: GameState, thisInstanceId: string, self: Pl
         throw new Error("expected discard-chosen response");
       }
       return r.instanceIds;
+    },
+    *promptShowHand(opts) {
+      const promptId = freshPromptId();
+      const prompt: ShowHandPrompt = {
+        kind: "show-hand",
+        promptId,
+        forPlayerIdx: opts.forPlayerIdx ?? self,
+        reason: opts.reason,
+        ownerIdx: opts.ownerIdx,
+        cards: opts.cards,
+      };
+      const r = (yield { kind: "prompt", prompt }) as PromptResponse | undefined;
+      if (!r || r.kind !== "ack") {
+        throw new Error("expected ack response");
+      }
+    },
+    *promptPlay(opts) {
+      // "Play 1 card" with an empty hand is a silent no-op — return null so
+      // the caller can short-circuit without issuing a prompt.
+      const for_ = opts.forPlayerIdx ?? self;
+      if (state.players[for_].hand.length === 0) return null;
+      const promptId = freshPromptId();
+      const prompt: PlayFromHandPrompt = {
+        kind: "play-from-hand",
+        promptId,
+        forPlayerIdx: for_,
+        reason: opts.reason,
+        allowedLines: opts.allowedLines ?? [0, 1, 2],
+        orientation: opts.orientation ?? "any",
+      };
+      const r = (yield { kind: "prompt", prompt }) as PromptResponse | undefined;
+      if (!r || r.kind !== "play-from-hand-chosen") {
+        throw new Error("expected play-from-hand-chosen response");
+      }
+      return { instanceId: r.instanceId, lineIdx: r.lineIdx, faceDown: r.faceDown };
     },
   };
 

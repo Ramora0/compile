@@ -45,7 +45,7 @@ function player(idx: PlayerIdx, protocols: string[], handIds: (string | null)[])
   return {
     id: idx === 0 ? "preview-you" : "preview-opp",
     hand: handIds.map((cid) => card(cid, idx, cid === null)),
-    deckCount: 18,
+    deck: { count: 18 },
     trash: [],
     protocols: protocols.map((p) => ({ protocol: p, compiled: false })),
   };
@@ -102,8 +102,15 @@ function buildState(): RedactedState {
     control: 0,
     winnerIdx: null,
     pendingPrompt: null,
+    opponentPromptSummary: null,
     players: [p0, p1],
     stacks,
+    lineValues: [
+      [0, 0, 0],
+      [0, 0, 0],
+    ],
+    compilableLines: [],
+    playOptions: {},
     log: [
       { t: 1, type: "turn-start", turn: 1, playerIdx: 0 },
       { t: 2, type: "play", playerIdx: 0, cardId: "fire-3", lineIdx: 0 as LineIdx, faceDown: false },

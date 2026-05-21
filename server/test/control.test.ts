@@ -51,4 +51,35 @@ describe("Control component lifecycle", () => {
     const releaseEntries = g.log.filter((e) => e.type === "control-released");
     expect(releaseEntries).toHaveLength(0);
   });
+
+  it("Refresh consumes Control even when the holder skips the rearrange (rules.md:51)", () => {
+    const g = newGame();
+    g.control = 0;
+    g.phase = "action";
+    const game = new Game(g);
+    game.submitAction(0, { kind: "refresh" });
+    expect(g.control).toBe("neutral");
+  });
+
+  it("Refresh does not affect Control when the active player does not hold it", () => {
+    const g = newGame();
+    g.control = 1; // opponent holds it
+    g.phase = "action";
+    const game = new Game(g);
+    game.submitAction(0, { kind: "refresh" });
+    expect(g.control).toBe(1);
+  });
+
+  it("Compile consumes Control even when the holder skips the rearrange (rules.md:57)", () => {
+    const g = newGame();
+    g.control = 0;
+    g.phase = "check-compile";
+    // chooseCompileLine trusts its caller (it's gated by the Check Compile phase,
+    // which only emits awaiting-compile-choice for compilable lines). We're
+    // exercising the Control-reset side effect, not the compile mechanics, so an
+    // empty line is fine here.
+    const game = new Game(g);
+    game.chooseCompileLine(0);
+    expect(g.control).toBe("neutral");
+  });
 });

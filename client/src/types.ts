@@ -31,7 +31,7 @@ export interface RedactedCard {
 export interface RedactedPlayer {
   id: string;
   hand: RedactedCard[] | { count: number };
-  deckCount: number;
+  deck: RedactedCard[] | { count: number };
   trash: RedactedCard[];
   protocols: { protocol: string; compiled: boolean }[];
 }
@@ -76,15 +76,52 @@ export type Prompt =
       forPlayerIdx: PlayerIdx;
       count: number;
       reason: string;
+    }
+  | {
+      kind: "play-from-hand";
+      promptId: string;
+      forPlayerIdx: PlayerIdx;
+      reason: string;
+      allowedLines: LineIdx[];
+      orientation: "any" | "face-up" | "face-down";
+    }
+  | {
+      kind: "show-hand";
+      promptId: string;
+      forPlayerIdx: PlayerIdx;
+      reason: string;
+      ownerIdx: PlayerIdx;
+      cards: { instanceId: string; cardId: string }[];
     };
 
 export type PromptResponse =
   | { kind: "card-chosen"; promptId: string; instanceId: string | null }
   | { kind: "line-chosen"; promptId: string; lineIdx: LineIdx }
   | { kind: "option-chosen"; promptId: string; optionId: string }
-  | { kind: "discard-chosen"; promptId: string; instanceIds: string[] };
+  | { kind: "discard-chosen"; promptId: string; instanceIds: string[] }
+  | {
+      kind: "play-from-hand-chosen";
+      promptId: string;
+      instanceId: string;
+      lineIdx: LineIdx;
+      faceDown: boolean;
+    }
+  | { kind: "ack"; promptId: string };
 
 export type ControlState = PlayerIdx | "neutral";
+
+/**
+ * Lightweight description of a prompt awaiting the *opponent*. The server
+ * sends this in place of the full prompt (which is redacted for the
+ * non-target viewer) so the UI can describe what they're doing.
+ */
+export interface OpponentPromptSummary {
+  kind: Prompt["kind"];
+  reason: string;
+  forPlayerIdx: PlayerIdx;
+  /** Only populated for discard-selection. */
+  count?: number;
+}
 
 export interface RedactedState {
   id: string;
@@ -94,9 +131,20 @@ export interface RedactedState {
   control: ControlState;
   winnerIdx: PlayerIdx | null;
   pendingPrompt: Prompt | null;
+  opponentPromptSummary: OpponentPromptSummary | null;
   players: [RedactedPlayer, RedactedPlayer];
   /** stacks[playerIdx][lineIdx] */
   stacks: RedactedCard[][][];
+  /** Effective line totals per side from the server (includes face-down-value overrides, value modifiers). */
+  lineValues: [number[], number[]];
+  /** Active player's compilable lines during check-compile (server-authoritative). */
+  compilableLines: number[];
+  /**
+   * Per-hand-card legal play targets keyed by instanceId. Only populated for
+   * cards in the viewer's own hand. The UI highlights drop zones from this;
+   * the server's `validatePlayCard` is the source of truth.
+   */
+  playOptions: Record<string, { faceUpLines: number[]; faceDownLines: number[] }>;
   log: LogEntry[];
 }
 

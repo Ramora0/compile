@@ -20,6 +20,7 @@ import {
   ignoreMiddleFor,
   recomputeOverrides,
 } from "./reactive/index.js";
+import { validatePlayCard } from "./actions.js";
 import { getCard } from "../cards/registry.js";
 import { createCardCtx } from "./ctx.js";
 import type { CardInstance, GameState, PlayerIdx } from "./types.js";
@@ -136,7 +137,7 @@ export class EffectRuntime {
     if (pending.promptId !== response.promptId) {
       throw new Error(`promptId mismatch: pending=${pending.promptId} got=${response.promptId}`);
     }
-    validateResponseForPrompt(pending, response);
+    validateResponseForPrompt(this.state, pending, response);
     this.state.pendingPrompt = null;
 
     // Feed the response into the parent generator on the next pump tick.
@@ -230,11 +231,53 @@ export class EffectRuntime {
   }
 
   private opDelete(op: DeleteOp): OpResult {
-    // Replacement triggers run BEFORE the removal (rules.md "First, ..." pattern).
-    this.fireReplacement(
-      op.cause === "compile" ? "deleted-by-compile" : "deleted",
-      op.instanceId,
-    );
+    // For compile-cause deletes, give the card's `deleted-by-compile` replacement
+    // trigger a chance to run BEFORE the removal so it can escape (Speed 2:
+    // "When this card would be deleted by compiling: Shift this card"). Triggers
+    // can issue prompts, so we can't pump them synchronously — instead we push
+    // a deferred wrapper below the triggers on the LIFO stack. The wrapper sees
+    // the post-trigger state and skips the removal if the card has been
+    // displaced (moved to a different line / side).
+    if (op.cause === "compile") {
+      const triggers = collectReplacementTriggers(
+        this.state,
+        "deleted-by-compile",
+        op.instanceId,
+      );
+      if (triggers.length > 0) {
+        const before = findCardOnField(this.state, op.instanceId);
+        const parent = this.captureParent();
+        this.push(
+          `delete:compile-defer:${op.instanceId}`,
+          this.deferredCompileDelete(op, before, parent),
+        );
+        fireTriggers(this, this.state, triggers);
+        return undefined;
+      }
+    } else {
+      // Non-compile deletes: no card today registers a plain `"deleted"`
+      // replacement trigger, so we keep the legacy fire-and-forget call for
+      // forwards-compat with any future card that does. (If one shows up, it'd
+      // want the same deferred pattern.)
+      this.fireReplacement("deleted", op.instanceId);
+    }
+    return this.applyDelete(op);
+  }
+
+  /**
+   * Capture the frame that yielded the current Op. `applyOp` is invoked from
+   * `pump`'s body immediately after `top = frames[length - 1]; top.gen.next()`,
+   * so at the moment any `opX` is on the call stack, `frames[length - 1]` IS
+   * the yielding (parent) frame by construction. Capture this reference BEFORE
+   * any mutation that may push child frames — once children sit above the
+   * parent, `frames[length - 2]` no longer points at it.
+   */
+  private captureParent(): Frame | null {
+    return this.frames[this.frames.length - 1] ?? null;
+  }
+
+  /** Perform the actual removal + bookkeeping. Does NOT fire replacement triggers. */
+  private applyDelete(op: DeleteOp): OpResult {
     const removed = removeFromStack(this.state, op.instanceId);
     if (!removed) {
       recomputeOverrides(this.state);
@@ -260,12 +303,52 @@ export class EffectRuntime {
     return { deleted: removed.removed };
   }
 
+  /**
+   * Body of the deferred compile-delete wrapper. Runs AFTER the replacement
+   * triggers above it on the stack have completed. If the card has been
+   * displaced (or removed) by a trigger, the original delete is cancelled —
+   * Speed 2's escape semantics. Otherwise, the removal proceeds normally.
+   *
+   * `parent` is captured before any mutation in `opDelete` because `applyDelete`
+   * itself may push frames (after-delete reactives, newly-uncovered middles),
+   * which would shift `frames[length - 2]` away from the real parent.
+   */
+  private *deferredCompileDelete(
+    op: DeleteOp,
+    before: { playerIdx: PlayerIdx; lineIdx: number } | null,
+    parent: Frame | null,
+  ): Generator<Op, void, OpResult> {
+    const after = findCardOnField(this.state, op.instanceId);
+    const escaped =
+      after === null ||
+      (before !== null &&
+        (after.playerIdx !== before.playerIdx || after.lineIdx !== before.lineIdx));
+    const result: OpResult = escaped ? { deleted: null } : this.applyDelete(op);
+    if (parent) parent.pendingInput = result;
+  }
+
   private opFlip(op: FlipOp): OpResult {
     const loc = findCardOnField(this.state, op.instanceId);
     if (!loc) return { flipped: null };
+    const triggers = collectReplacementTriggers(this.state, "flipped", op.instanceId);
+    if (triggers.length > 0) {
+      const parent = this.captureParent();
+      this.push(
+        `flip:defer:${op.instanceId}`,
+        this.deferredFlip(op, parent),
+      );
+      fireTriggers(this, this.state, triggers);
+      return undefined;
+    }
     const card = this.state.stacks[loc.playerIdx][loc.lineIdx].cards[loc.stackIdx]!;
-    // Replacement triggers run BEFORE the flip resolves.
-    this.fireReplacement("flipped", card.instanceId);
+    return this.applyFlip(card, loc);
+  }
+
+  /** Perform the flip + log + after-flip reactive + uncover-middle. No replacement fire. */
+  private applyFlip(
+    card: CardInstance,
+    loc: { playerIdx: PlayerIdx; lineIdx: number; stackIdx: number },
+  ): OpResult {
     card.faceDown = !card.faceDown;
     this.log({
       type: "flip",
@@ -282,14 +365,57 @@ export class EffectRuntime {
     return { flipped: { instanceId: card.instanceId, nowFaceDown: card.faceDown } };
   }
 
+  /**
+   * Body of the deferred flip wrapper. After replacement triggers run, the
+   * card may have been removed (Metal 6 top: "When this card would be flipped:
+   * First, delete this card") — in which case the flip itself has nothing to
+   * act on and is cancelled. Otherwise re-locate (the trigger may have shifted
+   * it) and apply the flip.
+   */
+  private *deferredFlip(op: FlipOp, parent: Frame | null): Generator<Op, void, OpResult> {
+    const loc = findCardOnField(this.state, op.instanceId);
+    let result: OpResult;
+    if (!loc) {
+      result = { flipped: null };
+    } else {
+      const card = this.state.stacks[loc.playerIdx][loc.lineIdx].cards[loc.stackIdx]!;
+      result = this.applyFlip(card, loc);
+    }
+    if (parent) parent.pendingInput = result;
+  }
+
   private opShift(op: ShiftOp): OpResult {
+    // "shifted" replacement on the moving card — no card defines it today;
+    // kept fire-and-forget for forwards compat.
     this.fireReplacement("shifted", op.instanceId);
     const removed = removeFromStack(this.state, op.instanceId);
     if (!removed) return { shifted: false };
-    // Fire 'covered' on the dest line's current top BEFORE the push.
     const destStack = this.state.stacks[removed.location.playerIdx][op.toLineIdx];
     const aboutToCover = destStack.cards[destStack.cards.length - 1] ?? null;
-    if (aboutToCover) this.fireReplacement("covered", aboutToCover.instanceId);
+    if (aboutToCover) {
+      const triggers = collectReplacementTriggers(this.state, "covered", aboutToCover.instanceId);
+      if (triggers.length > 0) {
+        const parent = this.captureParent();
+        this.push(
+          `shift:cover-defer:${op.instanceId}`,
+          this.deferredShiftPush(op, removed, parent),
+        );
+        fireTriggers(this, this.state, triggers);
+        return undefined;
+      }
+    }
+    return this.applyShiftPush(op, removed);
+  }
+
+  /**
+   * Perform the shift's push + log + after-shift reactive + nowUncovered middle
+   * (i.e. everything after the destination's "covered" replacement has fired).
+   * `removed` is the result of `removeFromStack` for the moving card.
+   */
+  private applyShiftPush(
+    op: ShiftOp,
+    removed: NonNullable<ReturnType<typeof removeFromStack>>,
+  ): OpResult {
     pushOntoStack(this.state, removed.location.playerIdx, op.toLineIdx, removed.removed);
     this.log({
       type: "shift",
@@ -306,6 +432,22 @@ export class EffectRuntime {
       this.runMiddleOf(removed.nowUncovered);
     }
     return { shifted: true };
+  }
+
+  /**
+   * Body of the deferred shift wrapper. After the destination's "covered"
+   * replacement triggers complete, push the moving card onto the destination
+   * line. No cancellation: if the trigger self-deleted the to-be-covered card,
+   * the destination stack just lost it, and the moving card lands one slot
+   * lower — the rules-intended outcome of "First, delete this card".
+   */
+  private *deferredShiftPush(
+    op: ShiftOp,
+    removed: NonNullable<ReturnType<typeof removeFromStack>>,
+    parent: Frame | null,
+  ): Generator<Op, void, OpResult> {
+    const result = this.applyShiftPush(op, removed);
+    if (parent) parent.pendingInput = result;
   }
 
   private opPlay(op: PlayOp): OpResult {
@@ -358,13 +500,36 @@ export class EffectRuntime {
       // Anchor missing — fall through to top-of-stack play.
     }
 
-    // Fire 'covered' on the soon-to-be-covered card BEFORE the push so its
-    // bottom replacement trigger is still considered visible (uncovered).
     const previouslyUncovered =
       this.state.stacks[op.playerIdx][op.lineIdx].cards[
         this.state.stacks[op.playerIdx][op.lineIdx].cards.length - 1
       ] ?? null;
-    if (previouslyUncovered) this.fireReplacement("covered", previouslyUncovered.instanceId);
+    if (previouslyUncovered) {
+      const triggers = collectReplacementTriggers(
+        this.state,
+        "covered",
+        previouslyUncovered.instanceId,
+      );
+      if (triggers.length > 0) {
+        // Defer the push so the soon-to-be-covered card's replacement trigger
+        // runs while it is still uncovered (rules.md: "First, …" semantics).
+        const parent = this.captureParent();
+        this.push(
+          `play:cover-defer:${card.instanceId}`,
+          this.deferredPlayCover(op, card, parent),
+        );
+        fireTriggers(this, this.state, triggers);
+        return undefined;
+      }
+    }
+    return this.applyPlayTop(op, card);
+  }
+
+  /**
+   * Perform a top-of-stack play (push + log + after-play reactive + middle).
+   * Does NOT fire the "covered" replacement — caller is responsible for that.
+   */
+  private applyPlayTop(op: PlayOp, card: CardInstance): OpResult {
     pushOntoStack(this.state, op.playerIdx, op.lineIdx, card);
     this.log({
       type: "play",
@@ -378,6 +543,22 @@ export class EffectRuntime {
     this.fireReactive("after-play", op.playerIdx);
     if (!card.faceDown) this.runMiddleOf(card);
     return { played: card };
+  }
+
+  /**
+   * Body of the deferred play wrapper. After the to-be-covered card's
+   * replacement triggers complete, push the new card onto the destination
+   * line. No cancellation: if the trigger self-deleted the to-be-covered card
+   * (Life 0, Metal 6), the new card simply lands on whatever's now on top of
+   * the (possibly empty) line — which matches the rules-intended outcome.
+   */
+  private *deferredPlayCover(
+    op: PlayOp,
+    card: CardInstance,
+    parent: Frame | null,
+  ): Generator<Op, void, OpResult> {
+    const result = this.applyPlayTop(op, card);
+    if (parent) parent.pendingInput = result;
   }
 
   private opReturn(op: ReturnOp): OpResult {
@@ -408,9 +589,15 @@ export class EffectRuntime {
 
   private opReveal(op: RevealOp): OpResult {
     const loc = findCardOnField(this.state, op.instanceId);
-    const card = loc
+    let card: CardInstance | null = loc
       ? this.state.stacks[loc.playerIdx][loc.lineIdx].cards[loc.stackIdx]!
       : null;
+    if (!card) {
+      for (const p of this.state.players) {
+        const inHand = p.hand.find((c) => c.instanceId === op.instanceId);
+        if (inHand) { card = inHand; break; }
+      }
+    }
     this.log({
       type: "reveal",
       instanceId: op.instanceId,
@@ -473,15 +660,25 @@ export class EffectRuntime {
   private runMiddleOf(card: CardInstance): void {
     const def = getCard(card.cardId);
     if (!def?.middle) return;
-    // Apathy 2 top — "Ignore all middle commands of cards in this line".
     const loc = findCardOnField(this.state, card.instanceId);
-    if (loc && ignoreMiddleFor(this.state, loc.playerIdx, loc.lineIdx)) return;
+    if (!loc) return;
+    // Middle text is "active text" — per rules.md:102, active text that is
+    // covered is no longer active. Flipping a covered card face-up does not
+    // re-resolve its middle.
+    const stack = this.state.stacks[loc.playerIdx][loc.lineIdx].cards;
+    if (loc.stackIdx !== stack.length - 1) return;
+    // Apathy 2 top — "Ignore all middle commands of cards in this line".
+    if (ignoreMiddleFor(this.state, loc.playerIdx, loc.lineIdx)) return;
     const ctx = createCardCtx(this.state, card.instanceId, card.ownerIdx);
     this.push(`middle:${card.instanceId}`, def.middle(ctx));
   }
 }
 
-function validateResponseForPrompt(pending: Prompt, response: PromptResponse): void {
+function validateResponseForPrompt(
+  state: GameState,
+  pending: Prompt,
+  response: PromptResponse,
+): void {
   switch (pending.kind) {
     case "choose-card":
       if (response.kind !== "card-chosen") throw new Error("expected card-chosen response");
@@ -497,6 +694,30 @@ function validateResponseForPrompt(pending: Prompt, response: PromptResponse): v
       if (response.instanceIds.length !== pending.count) {
         throw new Error(`expected ${pending.count} cards, got ${response.instanceIds.length}`);
       }
+      return;
+    case "play-from-hand":
+      if (response.kind !== "play-from-hand-chosen") {
+        throw new Error("expected play-from-hand-chosen response");
+      }
+      if (!pending.allowedLines.includes(response.lineIdx)) {
+        throw new Error(`line ${response.lineIdx} not allowed by prompt`);
+      }
+      if (pending.orientation === "face-up" && response.faceDown) {
+        throw new Error("prompt requires face-up play");
+      }
+      if (pending.orientation === "face-down" && !response.faceDown) {
+        throw new Error("prompt requires face-down play");
+      }
+      validatePlayCard(
+        state,
+        pending.forPlayerIdx,
+        response.instanceId,
+        response.lineIdx,
+        response.faceDown,
+      );
+      return;
+    case "show-hand":
+      if (response.kind !== "ack") throw new Error("expected ack response");
       return;
   }
 }

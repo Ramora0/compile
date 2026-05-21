@@ -34,14 +34,7 @@ const death1: CardDef = {
     kind: "trigger-phase",
     phase: "start",
     resolve: function* (ctx) {
-      const choice = yield* ctx.promptOption({
-        options: [
-          { id: "yes", label: "Draw 1" },
-          { id: "no", label: "Skip" },
-        ],
-        reason: "death1-may-draw",
-      });
-      if (choice !== "yes") return;
+      if (!(yield* h.confirm(ctx, "Draw 1", "death1-may-draw"))) return;
       // "You may draw 1 card. If you do, delete 1 other card, then delete
       // this card." The "if you do" clause only fires when a draw actually
       // happened — i.e. the deck (after trash reshuffle) had a card to give.

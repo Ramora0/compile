@@ -34,14 +34,7 @@ const darkness1: CardDef = {
   middle: function* (ctx) {
     const id = yield* h.flipChosen(ctx, { side: "opp" });
     if (!id) return;
-    const choice = yield* ctx.promptOption({
-      options: [
-        { id: "yes", label: "Shift it" },
-        { id: "no", label: "Skip" },
-      ],
-      reason: "darkness1-shift",
-    });
-    if (choice !== "yes") return;
+    if (!(yield* h.confirm(ctx, "Shift it", "darkness1-shift"))) return;
     // Re-read the card's location AFTER the flip and prompt — the flip could
     // have cascaded into middles that moved or deleted it; treat "card no
     // longer on the field" as a silent no-op.
@@ -91,23 +84,15 @@ const darkness3: CardDef = {
   value: 3,
   top: null,
   middle: function* (ctx) {
-    const hand = ctx.myHand();
-    if (hand.length === 0) return;
-    const id = yield* ctx.promptCard({
-      filter: { instanceIds: hand.map((c) => c.instanceId) },
-      optional: false,
-      reason: "darkness3-play",
-    });
-    if (!id) return;
     const thisLine = h.lineOfThis(ctx);
     const allowed: LineIdx[] =
       thisLine === null ? [0, 1, 2] : h.otherLines(thisLine);
     if (allowed.length === 0) return;
-    const lineIdx = yield* ctx.promptLine({
+    yield* h.playFromHand(ctx, {
+      reason: "darkness-3",
       allowedLines: allowed,
-      reason: "darkness3-line",
+      orientation: "face-down",
     });
-    yield* ctx.play({ instanceId: id, lineIdx, faceDown: true });
   },
   bottom: null,
 };

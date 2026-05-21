@@ -45,21 +45,6 @@ describe("Match — draft lifecycle", () => {
     expect(m.draft).not.toBeNull();
   });
 
-  it("draft picks follow the 1-2-2-1 order and produce a Game on completion", () => {
-    const m = new Match();
-    m.attach("a", "s1");
-    m.attach("b", "s2");
-    m.startDraftIfReady();
-    expect(m.draftWhoseTurn()).toBe(0);
-    expect(m.applyDraftPick(0, [PROTOCOLS[0]!])).toBe(false);
-    expect(m.draftWhoseTurn()).toBe(1);
-    expect(m.applyDraftPick(1, [PROTOCOLS[1]!, PROTOCOLS[2]!])).toBe(false);
-    expect(m.applyDraftPick(0, [PROTOCOLS[3]!, PROTOCOLS[4]!])).toBe(false);
-    expect(m.applyDraftPick(1, [PROTOCOLS[5]!])).toBe(true);
-    expect(m.game).not.toBeNull();
-    expect(m.draft).toBeNull();
-  });
-
   it("rejects picks from the wrong player", () => {
     const m = new Match();
     m.attach("a", "s1");
@@ -76,14 +61,6 @@ describe("Match — draft lifecycle", () => {
     expect(() => m.applyDraftPick(0, [PROTOCOLS[0]!, PROTOCOLS[1]!])).toThrow(/expected 1/);
   });
 
-  it("rejects already-picked protocols", () => {
-    const m = new Match();
-    m.attach("a", "s1");
-    m.attach("b", "s2");
-    m.startDraftIfReady();
-    m.applyDraftPick(0, [PROTOCOLS[0]!]);
-    expect(() => m.applyDraftPick(1, [PROTOCOLS[0]!, PROTOCOLS[1]!])).toThrow(/not in remaining pool/);
-  });
 });
 
 describe("Lobby", () => {

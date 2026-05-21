@@ -76,6 +76,26 @@ export function* discardSelfOneOrMore(ctx: CardCtxFull, reason = "discard-1+"): 
   return n;
 }
 
+// ===================== Confirmation prompts =====================
+
+/**
+ * "You may X. If you do, …" — a single yes/skip option prompt. Returns true
+ * iff the player chose to do the thing. Used by every card with a binary
+ * opt-in gate (Darkness 1's optional shift, Death 1's optional draw, …).
+ *
+ *     if (!(yield* h.confirm(ctx, "Shift it", "darkness-1-shift"))) return;
+ */
+export function* confirm(ctx: CardCtxFull, label: string, reason: string): Eff<boolean> {
+  const choice = yield* ctx.promptOption({
+    options: [
+      { id: "yes", label },
+      { id: "no", label: "Skip" },
+    ],
+    reason,
+  });
+  return choice === "yes";
+}
+
 // ===================== Field iteration / filters =====================
 
 export interface FieldEntry {
@@ -284,41 +304,32 @@ export function* shiftAllMatching(ctx: CardCtxFull, filter: FieldFilter, toLineI
 // ===================== Hand operations =====================
 
 /**
- * "Play 1 card." Prompt the player to pick a card from their hand and a line,
- * then play it (face-up if protocol matches, otherwise face-down by default
- * unless `forceFaceDown` is set).
+ * "Play 1 card." Hands the player the normal play UI (drag-drop from hand
+ * onto a lane with face-up/face-down drop zones) via a single combined
+ * `play-from-hand` prompt — no refresh, must play if hand is non-empty.
+ *
+ * Used by every card whose middle reads "Play 1 card …":
+ *   - Speed 0:    no restrictions (allowedLines = all, orientation = "any")
+ *   - Darkness 3: allowedLines = other lines, orientation = "face-down"
+ *
+ * The engine validates face-up-protocol-match and play-restriction overrides
+ * automatically on the response, so the helper stays a thin wrapper.
  */
 export function* playFromHand(
   ctx: CardCtxFull,
-  opts: { faceDown?: "ask" | true | false; reason?: string } = {},
+  opts: {
+    reason?: string;
+    allowedLines?: LineIdx[];
+    orientation?: "any" | "face-up" | "face-down";
+  } = {},
 ): Eff<CardInstance | null> {
-  const hand = ctx.myHand();
-  if (hand.length === 0) return null;
-  const handIds = hand.map((c) => c.instanceId);
-  const id = yield* ctx.promptCard({
-    filter: filterByIds(handIds),
-    optional: false,
+  const choice = yield* ctx.promptPlay({
     reason: opts.reason ?? "play-card",
+    ...(opts.allowedLines !== undefined ? { allowedLines: opts.allowedLines } : {}),
+    ...(opts.orientation !== undefined ? { orientation: opts.orientation } : {}),
   });
-  if (!id) return null;
-  const lineIdx = yield* ctx.promptLine({
-    allowedLines: [0, 1, 2],
-    reason: opts.reason ? `${opts.reason}-line` : "play-line",
-  });
-  let faceDown: boolean;
-  if (opts.faceDown === true) faceDown = true;
-  else if (opts.faceDown === false) faceDown = false;
-  else {
-    const choice = yield* ctx.promptOption({
-      options: [
-        { id: "up", label: "Face-up" },
-        { id: "down", label: "Face-down" },
-      ],
-      reason: "face-up-or-down",
-    });
-    faceDown = choice === "down";
-  }
-  return yield* ctx.play({ instanceId: id, lineIdx, faceDown });
+  if (!choice) return null;
+  return yield* ctx.play(choice);
 }
 
 /**
@@ -385,11 +396,21 @@ export function* giveOneToOpp(ctx: CardCtxFull, reason = "give"): Eff<boolean> {
   return true;
 }
 
-/** "Reveal your opponent's hand." Light 4. */
+/** "Reveal your opponent's hand." Light 4, Psychic 0. */
 export function* revealOppHand(ctx: CardCtxFull): Eff {
-  for (const c of ctx.oppHand()) {
+  const snapshot = ctx.oppHand().map((c) => ({
+    instanceId: c.instanceId,
+    cardId: c.cardId,
+  }));
+  for (const c of snapshot) {
     yield* ctx.reveal(c.instanceId, ctx.self);
   }
+  if (snapshot.length === 0) return;
+  yield* ctx.promptShowHand({
+    reason: "reveal-opp-hand",
+    ownerIdx: ctx.opp,
+    cards: snapshot,
+  });
 }
 
 /** "Reveal 1 card from your hand." Love 4. */

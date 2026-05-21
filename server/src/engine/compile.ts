@@ -14,6 +14,7 @@ import type { GameState, LineIdx, PlayerIdx } from "./types.js";
 import type { EffectRuntime } from "./runtime.js";
 import type { Op, OpResult } from "./ops.js";
 import { recomputeOverrides } from "./reactive/index.js";
+import { consumeControl } from "./control.js";
 
 export interface CompileResult {
   lineIdx: LineIdx;
@@ -75,6 +76,10 @@ export function* compileEffect(
   }
 
   state.compiledThisTurn = true;
+  // rules.md:57 — "Then, the Control component goes back to its neutral state."
+  // Holding Control and Compiling consumes it whether or not the holder
+  // rearranged first (rearrange would have already neutralized via submitRearrange).
+  if (state.control === playerIdx) consumeControl(state);
   recomputeOverrides(state);
 
   // Check victory.

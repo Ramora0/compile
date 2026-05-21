@@ -126,7 +126,9 @@ export type Prompt =
   | ChooseCardPrompt
   | ChooseLinePrompt
   | ChooseOptionPrompt
-  | DiscardSelectionPrompt;
+  | DiscardSelectionPrompt
+  | PlayFromHandPrompt
+  | ShowHandPrompt;
 
 export interface ChooseCardPrompt {
   kind: "choose-card";
@@ -161,6 +163,53 @@ export interface DiscardSelectionPrompt {
   reason: string;
 }
 
+/**
+ * "Play 1 card." Hand a player the normal play UI (drag-drop from hand to a
+ * lane with face-up/face-down drop zones), forced — they can't refresh out of
+ * it. The card actually played is determined by the response; the engine then
+ * runs a play Op on the chosen target.
+ *
+ * Cards that issue this prompt:
+ *   - Speed 0:    any line, either orientation
+ *   - Darkness 3: another line, face-down only
+ *
+ * The prompt narrows what the player may submit; face-up legality (matching
+ * protocol on the destination line) is still enforced by the engine on the
+ * response, mirroring normal action-phase play validation.
+ */
+export interface PlayFromHandPrompt {
+  kind: "play-from-hand";
+  promptId: string;
+  forPlayerIdx: PlayerIdx;
+  reason: string;
+  /** Valid destination lines. */
+  allowedLines: LineIdx[];
+  /**
+   * "any"        — player chooses face-up or face-down (subject to face-up
+   *                protocol-match rules).
+   * "face-up"    — face-up only.
+   * "face-down"  — face-down only.
+   */
+  orientation: "any" | "face-up" | "face-down";
+}
+
+/**
+ * "Reveal opponent's hand" (Light 4, Psychic 0). Pauses the game while the
+ * prompted player views a snapshot of the opp's hand; resolved by an `ack`
+ * response. Card identities are carried on the prompt itself so the UI
+ * doesn't need to peek at redacted hand state.
+ */
+export interface ShowHandPrompt {
+  kind: "show-hand";
+  promptId: string;
+  forPlayerIdx: PlayerIdx;
+  reason: string;
+  /** Whose hand is being shown. */
+  ownerIdx: PlayerIdx;
+  /** Snapshot of the revealed hand at the moment of reveal. */
+  cards: { instanceId: string; cardId: string }[];
+}
+
 export interface CardFilter {
   side?: Side | "any";
   faceUp?: boolean;
@@ -177,4 +226,12 @@ export type PromptResponse =
   | { kind: "card-chosen"; promptId: string; instanceId: string | null }
   | { kind: "line-chosen"; promptId: string; lineIdx: LineIdx }
   | { kind: "option-chosen"; promptId: string; optionId: string }
-  | { kind: "discard-chosen"; promptId: string; instanceIds: string[] };
+  | { kind: "discard-chosen"; promptId: string; instanceIds: string[] }
+  | {
+      kind: "play-from-hand-chosen";
+      promptId: string;
+      instanceId: string;
+      lineIdx: LineIdx;
+      faceDown: boolean;
+    }
+  | { kind: "ack"; promptId: string };

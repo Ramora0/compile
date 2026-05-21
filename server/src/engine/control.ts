@@ -7,9 +7,12 @@
  *  - When the holder takes the Compile or Refresh action, they MAY rearrange
  *    one player's protocols before that action resolves. The cards in those
  *    lines stay in place — only the protocol headers move. Then the component
- *    returns to neutral.
+ *    returns to neutral (rules.md:51, :57 — "Then, the Control component goes
+ *    back to its neutral state"). The reset happens whether or not they
+ *    rearranged: the Compile/Refresh resolution itself consumes Control.
  *
- * Use of the component is optional; the holder may skip the rearrange.
+ * Rearranging is optional; consumption is not. A holder who Refreshes or
+ * Compiles without rearranging still loses Control at the end of that action.
  */
 
 import type { GameState, PlayerIdx, ProtocolSlot } from "./types.js";

@@ -112,7 +112,7 @@ export class Match {
     if (!this.players[0] || !this.players[1]) return false;
     this.draft = {
       picks: [],
-      remainingPool: [...PROTOCOLS],
+      remainingPool: PROTOCOLS.filter((p) => p !== "hate" && p !== "apathy" && p !== "love"),
       step: 0,
     };
     return true;

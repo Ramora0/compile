@@ -12,6 +12,11 @@ export interface CardProps {
   middle?: string;
   bottom?: string;
   size?: "hand" | "field";
+  /** Override the card's width in pixels. Drives `--cp-card-w`, which all
+   *  internal dimensions and font sizes scale from. Use this for the hand
+   *  when many cards need to shrink to fit; field cards already get the
+   *  right size from `size="field"`. */
+  width?: number;
   className?: string;
   style?: CSSProperties;
   draggable?: boolean;
@@ -31,6 +36,7 @@ export function Card({
   middle,
   bottom,
   size = "hand",
+  width,
   className = "",
   style,
   draggable,
@@ -53,8 +59,13 @@ export function Card({
     .filter(Boolean)
     .join(" ");
 
+  const mergedStyle: CSSProperties =
+    width != null
+      ? { ...(style ?? {}), ["--cp-card-w" as never]: `${width}px` }
+      : style ?? {};
+
   return (
-    <div className={classes} style={style} draggable={draggable} {...handlers}>
+    <div className={classes} style={mergedStyle} draggable={draggable} {...handlers}>
       <div className="cp-card-inner">
         <div className="cp-card-head">
           <div className="cp-card-el">{el}</div>

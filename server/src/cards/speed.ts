@@ -21,7 +21,7 @@ const speed0: CardDef = {
   value: 0,
   top: null,
   middle: function* (ctx) {
-    yield* h.playFromHand(ctx, { faceDown: "ask", reason: "speed-0" });
+    yield* h.playFromHand(ctx, { reason: "speed-0" });
   },
   bottom: null,
 };
@@ -59,8 +59,8 @@ const speed2: CardDef = {
         reason: "speed-2-escape",
       });
       yield* ctx.shift(ctx.thisInstanceId, dest);
-      // note: engine still proceeds to delete this card from its new location;
-      // proper "escape from compile" requires replacement-cancellation support.
+      // Engine detects the shift via the deferred compile-delete wrapper
+      // (runtime.opDelete) and cancels the would-be removal.
     },
   },
   middle: null,
