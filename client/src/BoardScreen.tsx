@@ -26,19 +26,44 @@ import { AnimationLayer } from "./ui/AnimationLayer.js";
 import { AnimationProvider, useAnchorAnimClass, useCardAnimClass } from "./ui/animationContext.js";
 
 // ────────────────────────────────────────────────────────────
-// Layout constants — mirror design_handoff_match_board_rails
+// Layout constants
+// Hand sits on the left as a 2-wide vertical grid; lanes occupy the middle
+// full-height; right rail (opp/turn/you) tops the right column with the
+// action log docked below it in the bottom-right corner.
 // ────────────────────────────────────────────────────────────
 const PAD = 48;
-const LEFT_W = 240;
+const HAND_W = 490;
 const RIGHT_W = 320;
 const RAIL_GAP = 20;
 const TOP_OFFSET = 18;
-const BOTTOM_H = 282;
-const RAIL_H = 1200 - TOP_OFFSET - BOTTOM_H;
-const LANES_X = PAD + LEFT_W + RAIL_GAP;
-const LANES_W = 1920 - PAD * 2 - LEFT_W - RIGHT_W - RAIL_GAP * 2;
-const CARD_STACK_SPACING = 50;
+const BOTTOM_OFFSET = 18;
+const RAIL_VERTICAL_GAP = 12;
 const LOG_PANEL_H = 260;
+const LANES_X = PAD + HAND_W + RAIL_GAP;
+const LANES_W = 1920 - PAD * 2 - HAND_W - RIGHT_W - RAIL_GAP * 2;
+const LANES_H = 1200 - TOP_OFFSET - BOTTOM_OFFSET;
+const HAND_H = 1200 - TOP_OFFSET - BOTTOM_OFFSET;
+const RIGHT_RAIL_H = 1200 - TOP_OFFSET - BOTTOM_OFFSET - LOG_PANEL_H - RAIL_VERTICAL_GAP;
+const LOG_Y = TOP_OFFSET + RIGHT_RAIL_H + RAIL_VERTICAL_GAP;
+const FIELD_COL_W = 140;
+const CARD_STACK_SPACING = 88;
+const CARD_STACK_SPACING_NARROW = 36;
+
+function gapAfterCard(card: RedactedCard): number {
+  if (card.faceDown) return CARD_STACK_SPACING_NARROW;
+  const top = getCard(card.cardId)?.top?.trim();
+  return top ? CARD_STACK_SPACING : CARD_STACK_SPACING_NARROW;
+}
+
+function stackOffsets(stack: RedactedCard[]): { offsets: number[]; total: number } {
+  const offsets: number[] = [];
+  let cum = 0;
+  for (let i = 0; i < stack.length; i++) {
+    offsets.push(cum);
+    if (i < stack.length - 1) cum += gapAfterCard(stack[i]!);
+  }
+  return { offsets, total: cum };
+}
 
 export interface BoardScreenProps {
   state: RedactedState;
@@ -136,6 +161,23 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
   const oppPlayer = state.players[oppIdx];
   const youHand = Array.isArray(youPlayer.hand) ? youPlayer.hand : [];
   const oppHand = Array.isArray(oppPlayer.hand) ? oppPlayer.hand : [];
+
+  const youProtocolOrder = youPlayer.protocols.map((p) => p.protocol).join(",");
+  const sortedYouHand = useMemo(() => {
+    const order = youProtocolOrder.split(",");
+    const protoRank = (el: string) => {
+      const i = order.indexOf(el);
+      return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+    };
+    return youHand.slice().sort((a, b) => {
+      const ap = parseCardId(a.cardId);
+      const bp = parseCardId(b.cardId);
+      const ra = protoRank(ap.el);
+      const rb = protoRank(bp.el);
+      if (ra !== rb) return ra - rb;
+      return (ap.num ?? 0) - (bp.num ?? 0);
+    });
+  }, [youHand, youProtocolOrder]);
 
   const canAct =
     state.phase === "action" &&
@@ -285,11 +327,11 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
         oppPlayer={oppPlayer}
         oppHandCount={oppHand.length}
         canAct={canAct}
-        onEndTurn={refresh}
+        onRefresh={refresh}
       />
 
       <HandStrip
-        hand={youHand}
+        hand={sortedYouHand}
         canAct={canAct}
         dragInstanceId={dragInstanceId}
         onDragStart={setDragInstanceId}
@@ -431,7 +473,7 @@ function LanesGrid({
         top: TOP_OFFSET,
         left: LANES_X,
         width: LANES_W,
-        height: RAIL_H,
+        height: LANES_H,
         display: "grid",
         gridTemplateColumns: "repeat(3, 1fr)",
         gap: 22,
@@ -506,6 +548,9 @@ function Lane({
   const youCompile = stackValue(youStack);
   const oppCompile = stackValue(oppStack);
 
+  const youStackOffsets = stackOffsets(youStack);
+  const oppStackOffsets = stackOffsets(oppStack);
+
   const youCompiled = !!youSlot?.compiled;
   const oppCompiled = !!oppSlot?.compiled;
 
@@ -535,28 +580,38 @@ function Lane({
           : null),
       }}
     >
-      <SlimLaneHeader side="opp" el={oppEl} value={oppCompile} compiled={oppCompiled} playerIdx={oppIdx} lineIdx={lineIdx} />
-
-      {/* OPP STACK */}
-      <div style={{ flex: 1, position: "relative" }}>
+      {/* OPP HALF — lightly tinted by opp's protocol, glow strongest near the centered headers */}
+      <div
+        className={elClass(oppEl)}
+        style={{
+          flex: 1,
+          position: "relative",
+          background:
+            "linear-gradient(0deg, rgba(var(--el-rgb), 0.07), rgba(var(--el-rgb), 0.01) 70%, transparent)",
+        }}
+      >
         <div
           style={{
             position: "absolute",
-            top: 18,
+            bottom: 18,
             left: "50%",
             transform: "translateX(-50%)",
-            width: 124,
+            width: FIELD_COL_W,
           }}
         >
           {oppStack.map((c, i) => {
             const { el, num } = parseCardId(c.cardId);
             const isTop = i === oppStack.length - 1;
             const selectable = targets.cards.has(c.instanceId);
+            // Stack hugs the bottom of opp's half (against the centered
+            // headers). Oldest card sits at the top of the visible stack;
+            // newest (top of pile) at the bottom — flush with the headers.
             return (
               <CardStackSlot
                 key={c.instanceId}
-                positionStyle={{ top: i * CARD_STACK_SPACING, transform: "rotate(180deg)" }}
+                positionStyle={{ bottom: oppStackOffsets.total - oppStackOffsets.offsets[i]! }}
                 isTop={isTop}
+                coveredCount={oppStack.length - 1 - i}
                 el={el}
                 num={num}
                 instanceId={c.instanceId}
@@ -567,69 +622,108 @@ function Lane({
                 onPick={selectable ? onCardPick : undefined}
                 playerIdx={oppIdx}
                 lineIdx={lineIdx}
+                side="opp"
               />
             );
           })}
         </div>
       </div>
 
-      {/* LINE DIVIDER */}
+      {/* CENTER BAND — both headers back-to-back at the lane's midline, each
+          facing its own stack. Both remain right-side-up for the local viewer. */}
       <div
         style={{
           position: "relative",
-          height: 22,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
           flexShrink: 0,
           zIndex: 5,
+          background: "var(--void-2)",
+        }}
+      >
+        <SlimLaneHeader
+          side="opp"
+          el={oppEl}
+          value={oppCompile}
+          compiled={oppCompiled}
+          playerIdx={oppIdx}
+          lineIdx={lineIdx}
+          centered
+        />
+
+        <div
+          style={{
+            position: "relative",
+            height: 16,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              left: 14,
+              right: 14,
+              top: "50%",
+              borderTop: "1px dashed var(--line-3)",
+            }}
+          />
+          <span
+            className="mono"
+            style={{
+              background: "var(--void-2)",
+              padding: "1px 10px",
+              fontSize: 8,
+              letterSpacing: "0.28em",
+              color: "var(--ink-faint)",
+            }}
+          >
+            L{lineIdx + 1}
+          </span>
+        </div>
+
+        <SlimLaneHeader
+          side="you"
+          el={youEl}
+          value={youCompile}
+          compiled={youCompiled}
+          playerIdx={youIdx}
+          lineIdx={lineIdx}
+          centered
+        />
+      </div>
+
+      {/* YOUR HALF — lightly tinted by your protocol, glow strongest near the centered headers */}
+      <div
+        className={elClass(youEl)}
+        style={{
+          flex: 1,
+          position: "relative",
+          background:
+            "linear-gradient(180deg, rgba(var(--el-rgb), 0.07), rgba(var(--el-rgb), 0.01) 70%, transparent)",
         }}
       >
         <div
           style={{
             position: "absolute",
-            left: 14,
-            right: 14,
-            top: "50%",
-            borderTop: "1px dashed var(--line-3)",
-          }}
-        />
-        <span
-          className="mono"
-          style={{
-            background: "var(--void-2)",
-            padding: "3px 14px",
-            fontSize: 9,
-            letterSpacing: "0.28em",
-            color: "var(--ink-faint)",
-            border: "1px solid var(--line-2)",
-            borderRadius: 999,
-          }}
-        >
-          LINE · {(lineIdx + 1).toString().padStart(2, "0")}
-        </span>
-      </div>
-
-      {/* YOUR STACK */}
-      <div style={{ flex: 1, position: "relative" }}>
-        <div
-          style={{
-            position: "absolute",
-            bottom: 18,
+            top: 18,
             left: "50%",
             transform: "translateX(-50%)",
-            width: 124,
+            width: FIELD_COL_W,
           }}
         >
           {youStack.map((c, i) => {
             const { el, num } = parseCardId(c.cardId);
             const isTop = i === youStack.length - 1;
             const selectable = targets.cards.has(c.instanceId);
+            // Stack hugs the top of your half (against the centered headers).
+            // Oldest card sits at the top of the visible stack — flush with the
+            // headers; newest (top of pile) at the bottom of the visible stack.
             return (
               <CardStackSlot
                 key={c.instanceId}
-                positionStyle={{ bottom: i * CARD_STACK_SPACING }}
+                positionStyle={{ top: youStackOffsets.offsets[i] }}
                 isTop={isTop}
+                coveredCount={youStack.length - 1 - i}
                 el={el}
                 num={num}
                 instanceId={c.instanceId}
@@ -640,6 +734,7 @@ function Lane({
                 onPick={selectable ? onCardPick : undefined}
                 playerIdx={youIdx}
                 lineIdx={lineIdx}
+                side="you"
               />
             );
           })}
@@ -673,8 +768,6 @@ function Lane({
           </div>
         )}
       </div>
-
-      <SlimLaneHeader side="you" el={youEl} value={youCompile} compiled={youCompiled} playerIdx={youIdx} lineIdx={lineIdx} />
     </div>
   );
 }
@@ -726,6 +819,7 @@ function PlayDropZone({
 function CardStackSlot({
   positionStyle,
   isTop,
+  coveredCount,
   el,
   num,
   instanceId,
@@ -736,9 +830,12 @@ function CardStackSlot({
   onPick,
   playerIdx,
   lineIdx,
+  side,
 }: {
   positionStyle: CSSProperties;
   isTop: boolean;
+  /** How many newer cards are stacked on top of this one (0 = uncovered/newest). */
+  coveredCount: number;
   el: string;
   num: number | undefined;
   instanceId: string;
@@ -749,20 +846,26 @@ function CardStackSlot({
   onPick?: (instanceId: string) => void;
   playerIdx: PlayerIdx;
   lineIdx: LineIdx;
+  side: "you" | "opp";
 }) {
   const { setHovered } = useContext(HoverCtx);
   const info = getCard(cardId);
-  // Selectable covered cards lift above their coverers so they remain clickable.
-  const baseZ = isTop ? 100 : positionStyle.bottom !== undefined ? 50 - (positionStyle.bottom as number) / 10 : 1;
+  // Newer cards (smaller coveredCount) always render on top of older ones —
+  // works regardless of whether the stack grows up or down. Selectable covered
+  // cards lift above their coverers so they remain clickable.
+  const baseZ = 100 - coveredCount;
   const zIndex = selectable ? 500 : baseZ;
   const animClass = useCardAnimClass(instanceId);
   const anchorId = `stack:${playerIdx}:${lineIdx}:${instanceId}`;
   const anchorRef = useAnchor(anchorId);
   const anyAnchorRef = useAnchor(`stack:any:${instanceId}`);
-  const classes = ["cp-card-slot"];
+  const classes = ["cp-card-slot", `side-${side}`];
   if (selectable) classes.push("is-selectable");
   if (selected) classes.push("is-selected");
   if (animClass) classes.push(animClass);
+  // Only the local player's own face-down cards reveal on hover; the
+  // opponent's face-down cards stay secret.
+  const revealOnHover = side === "you" && faceDown;
   return (
     <div
       className={classes.join(" ")}
@@ -786,6 +889,7 @@ function CardStackSlot({
         el={el}
         num={num}
         faceDown={faceDown}
+        revealOnHover={revealOnHover}
         top={info?.top}
         middle={info?.middle}
         bottom={info?.bottom}
@@ -807,6 +911,7 @@ function SlimLaneHeader({
   compiled,
   playerIdx,
   lineIdx,
+  centered,
 }: {
   side: "you" | "opp";
   el: string;
@@ -814,12 +919,21 @@ function SlimLaneHeader({
   compiled: boolean;
   playerIdx: PlayerIdx;
   lineIdx: LineIdx;
+  /** When true, the header sits at the lane's midline, with opp's header on
+   *  top of the center band and yours below it. Each header's outer border
+   *  faces its own stack (top for opp, bottom for you). */
+  centered?: boolean;
 }) {
   const elColor = elCssVar(el);
   const compiledCls = compiled ? (side === "you" ? "cp-lane-compiled bottom" : "cp-lane-compiled") : "";
   const anchorId = `lane-header:${playerIdx}:${lineIdx}`;
   const anchorRef = useAnchor(anchorId);
   const animClass = useAnchorAnimClass(anchorId);
+  const borderColor = `1px solid rgba(var(--el-rgb), ${compiled ? 0.4 : 0.18})`;
+  // Centered headers face outward toward their own stack: opp's stack is above,
+  // your stack is below. At the lane edges (non-centered), they face inward.
+  const showBorderTop = centered ? side === "opp" : side === "you";
+  const showBorderBottom = centered ? side === "you" : side === "opp";
   return (
     <div
       ref={anchorRef as React.RefCallback<HTMLDivElement>}
@@ -831,10 +945,8 @@ function SlimLaneHeader({
         display: "flex",
         alignItems: "center",
         gap: 12,
-        borderBottom:
-          side === "opp" ? `1px solid rgba(var(--el-rgb), ${compiled ? 0.4 : 0.18})` : "none",
-        borderTop:
-          side === "you" ? `1px solid rgba(var(--el-rgb), ${compiled ? 0.4 : 0.18})` : "none",
+        borderBottom: showBorderBottom ? borderColor : "none",
+        borderTop: showBorderTop ? borderColor : "none",
         flexShrink: 0,
       }}
     >
@@ -1088,9 +1200,9 @@ function LeftRail({
       className="cp-panel"
       style={{
         position: "absolute",
-        left: PAD,
-        top: TOP_OFFSET,
-        width: LEFT_W,
+        right: PAD,
+        top: LOG_Y,
+        width: RIGHT_W,
         height: LOG_PANEL_H,
         padding: 16,
         display: "flex",
@@ -1132,7 +1244,7 @@ function LeftRail({
                 key={idx}
                 className={i === 0 ? "cp-log-entry-incoming" : undefined}
                 style={{
-                  padding: "5px 6px",
+                  padding: "4px 6px",
                   background: i === 0 ? "rgba(139,92,246,0.10)" : "transparent",
                   borderLeft:
                     i === 0 ? "2px solid var(--purple-400)" : "2px solid transparent",
@@ -1143,15 +1255,14 @@ function LeftRail({
                   marginBottom: 2,
                   display: "flex",
                   alignItems: "baseline",
-                  gap: 6,
+                  gap: 4,
                 }}
               >
                 <span
                   style={{
                     color: "var(--ink-faint)",
                     fontSize: 8.5,
-                    letterSpacing: "0.08em",
-                    width: 28,
+                    letterSpacing: 0,
                     flexShrink: 0,
                   }}
                 >
@@ -1160,10 +1271,9 @@ function LeftRail({
                 <span
                   style={{
                     fontSize: 8.5,
-                    letterSpacing: "0.12em",
+                    letterSpacing: 0,
                     fontWeight: 700,
                     color: f.who === "P1" ? "var(--purple-400)" : "var(--ink-dim)",
-                    width: 22,
                     flexShrink: 0,
                   }}
                 >
@@ -1175,10 +1285,9 @@ function LeftRail({
                     fontSize: 10.5,
                     fontWeight: f.bold ? 700 : 400,
                     flex: 1,
+                    minWidth: 0,
                     lineHeight: 1.25,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
+                    wordBreak: "break-word",
                   }}
                 >
                   {f.txt}
@@ -1250,15 +1359,14 @@ function LogOverlay({
                   marginBottom: 3,
                   display: "flex",
                   alignItems: "baseline",
-                  gap: 10,
+                  gap: 8,
                 }}
               >
                 <span
                   style={{
                     color: "var(--ink-faint)",
                     fontSize: 10,
-                    letterSpacing: "0.08em",
-                    width: 38,
+                    letterSpacing: 0,
                     flexShrink: 0,
                   }}
                 >
@@ -1267,10 +1375,9 @@ function LogOverlay({
                 <span
                   style={{
                     fontSize: 10,
-                    letterSpacing: "0.12em",
+                    letterSpacing: 0,
                     fontWeight: 700,
                     color: f.who === "P1" ? "var(--purple-400)" : "var(--ink-dim)",
-                    width: 30,
                     flexShrink: 0,
                   }}
                 >
@@ -1282,6 +1389,8 @@ function LogOverlay({
                     fontSize: 12,
                     fontWeight: f.bold ? 700 : 400,
                     flex: 1,
+                    minWidth: 0,
+                    wordBreak: "break-word",
                   }}
                 >
                   {f.txt}
@@ -1307,7 +1416,7 @@ function RightRail({
   oppPlayer,
   oppHandCount,
   canAct,
-  onEndTurn,
+  onRefresh,
 }: {
   state: RedactedState;
   youIdx: PlayerIdx;
@@ -1316,19 +1425,40 @@ function RightRail({
   oppPlayer: RedactedPlayer;
   oppHandCount: number;
   canAct: boolean;
-  onEndTurn: () => void;
+  onRefresh: () => void;
 }) {
   const youCompiled = compiledCount(youPlayer);
   const oppCompiled = compiledCount(oppPlayer);
   const youHandLen = Array.isArray(youPlayer.hand) ? youPlayer.hand.length : 0;
 
-  const statusLabel = canAct
-    ? "● YOUR MOVE"
-    : state.phase === "check-compile"
-      ? "● COMPILE PHASE"
-      : state.pendingPrompt
-        ? "● AWAITING INPUT"
-        : `● ${oppPlayer.id.toUpperCase()}'S MOVE`;
+  const isMyTurn = state.activePlayerIdx === youIdx;
+  const gameOver = state.winnerIdx !== null;
+  const youActive = !gameOver && isMyTurn;
+  const oppActive = !gameOver && !isMyTurn;
+
+  const youLabel = "YOU";
+  const oppLabel = `OPPONENT`;
+
+  const statusTone: "you" | "opp" | "neutral" = gameOver
+    ? "neutral"
+    : isMyTurn
+      ? "you"
+      : "opp";
+  const statusLabel = gameOver
+    ? "GAME OVER"
+    : canAct
+      ? "YOUR TURN"
+      : isMyTurn
+        ? state.pendingPrompt
+          ? "YOUR INPUT NEEDED"
+          : state.phase === "check-compile"
+            ? "YOUR COMPILE PHASE"
+            : "YOUR TURN"
+        : state.pendingPrompt && state.pendingPrompt.forPlayerIdx === oppIdx
+          ? `${oppLabel} — INPUT NEEDED`
+          : state.phase === "check-compile"
+            ? `${oppLabel} — COMPILE PHASE`
+            : `${oppLabel}'S TURN`;
 
   return (
     <div
@@ -1337,14 +1467,14 @@ function RightRail({
         right: PAD,
         top: TOP_OFFSET,
         width: RIGHT_W,
-        height: RAIL_H,
+        height: RIGHT_RAIL_H,
         display: "flex",
         flexDirection: "column",
       }}
     >
       {/* OPP BLOCK */}
       <div
-        className="cp-panel"
+        className={`cp-panel ${oppActive ? "cp-active-panel-opp" : "cp-inactive-panel"}`}
         style={{
           padding: "18px 20px 20px",
           display: "flex",
@@ -1358,20 +1488,35 @@ function RightRail({
               width: 44,
               height: 44,
               borderRadius: 999,
-              border: "1.5px solid var(--line-3)",
-              background: "linear-gradient(135deg, rgba(255,255,255,0.05), transparent)",
+              border: oppActive ? "1.5px solid var(--fire)" : "1.5px solid var(--line-3)",
+              background: oppActive
+                ? "linear-gradient(135deg, rgba(var(--fire-rgb), 0.45), transparent)"
+                : "linear-gradient(135deg, rgba(255,255,255,0.05), transparent)",
+              boxShadow: oppActive ? "0 0 14px rgba(var(--fire-rgb), 0.5)" : "none",
               display: "grid",
               placeItems: "center",
               fontSize: 18,
               fontFamily: "JetBrains Mono, monospace",
-              color: "var(--ink-dim)",
+              color: oppActive ? "var(--fire)" : "var(--ink-dim)",
               flexShrink: 0,
             }}
           >
             ◎
           </div>
           <div className="col" style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 15, fontWeight: 600 }}>{oppPlayer.id}</div>
+            <div
+              style={{
+                fontSize: 15,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+              title={oppPlayer.id}
+            >
+              {oppLabel}
+              {oppActive && <span className="cp-turn-badge opp">◀ TURN</span>}
+            </div>
             <div
               className="mono"
               style={{
@@ -1448,7 +1593,7 @@ function RightRail({
               className="mono"
               style={{ fontSize: 8, letterSpacing: "0.22em", color: "var(--ink-faint)" }}
             >
-              {oppPlayer.id.toUpperCase().slice(0, 6)}
+              {oppLabel}
             </span>
             <span
               className="disp"
@@ -1509,33 +1654,30 @@ function RightRail({
           </div>
         </div>
 
-        <div
-          style={{
-            marginTop: 12,
-            padding: "8px 12px",
-            background: "rgba(139,92,246,0.18)",
-            border: "1px solid var(--purple-400)",
-            borderRadius: 6,
-            textAlign: "center",
-          }}
-        >
-          <span
-            className="mono"
-            style={{
-              fontSize: 11,
-              fontWeight: 700,
-              letterSpacing: "0.22em",
-              color: "var(--purple-300)",
-            }}
-          >
-            {statusLabel}
-          </span>
-        </div>
+        {statusTone === "opp" && (
+          <div className={`cp-turn-status opp`} style={{ marginTop: 12 }}>
+            <span className="cp-turn-arrow">▲</span>
+            <span>{statusLabel}</span>
+            <span className="cp-turn-arrow">▲</span>
+          </div>
+        )}
+        {statusTone === "you" && (
+          <div className={`cp-turn-status you`} style={{ marginTop: 12 }}>
+            <span className="cp-turn-arrow">▼</span>
+            <span>{statusLabel}</span>
+            <span className="cp-turn-arrow">▼</span>
+          </div>
+        )}
+        {statusTone === "neutral" && (
+          <div className={`cp-turn-status neutral`} style={{ marginTop: 12 }}>
+            <span>{statusLabel}</span>
+          </div>
+        )}
       </TurnBandWrap>
 
       {/* YOU BLOCK */}
       <div
-        className="cp-panel"
+        className={`cp-panel ${youActive ? "cp-active-panel-you" : "cp-inactive-panel"}`}
         style={{
           padding: "18px 20px 18px",
           display: "flex",
@@ -1544,7 +1686,6 @@ function RightRail({
           borderColor: "var(--purple-500)",
           background:
             "linear-gradient(180deg, rgba(139,92,246,0.06), rgba(139,92,246,0.01)), rgba(13,11,34,0.6)",
-          boxShadow: "0 0 0 1px rgba(139,92,246,0.2) inset",
         }}
       >
         <div className="row gap-3" style={{ alignItems: "flex-end" }}>
@@ -1572,7 +1713,19 @@ function RightRail({
             ◉
           </div>
           <div className="col" style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 15, fontWeight: 600 }}>{youPlayer.id}</div>
+            <div
+              style={{
+                fontSize: 15,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+              title={youPlayer.id}
+            >
+              {youLabel}
+              {youActive && <span className="cp-turn-badge you">TURN ▶</span>}
+            </div>
             <div
               className="mono"
               style={{
@@ -1628,9 +1781,9 @@ function RightRail({
             letterSpacing: "0.24em",
             justifyContent: "center",
           }}
-          onClick={onEndTurn}
+          onClick={onRefresh}
         >
-          END TURN ▶
+          REFRESH ▶
         </button>
       </div>
     </div>
@@ -1787,31 +1940,37 @@ function HandStrip({
       data-anim-anchor={`hand-zone:${youIdx}`}
       style={{
         position: "absolute",
-        bottom: 0,
-        left: 0,
-        right: 0,
-        height: BOTTOM_H,
-        borderTop: "1px solid var(--line-2)",
-        background: "linear-gradient(0deg, rgba(13,11,34,0.7), transparent)",
-        display: "flex",
-        alignItems: "flex-end",
-        justifyContent: "center",
-        padding: "0 0 22px",
+        top: TOP_OFFSET,
+        left: PAD,
+        width: HAND_W,
+        height: HAND_H,
+        borderRight: "1px solid var(--line-2)",
+        background: "linear-gradient(90deg, transparent, rgba(13,11,34,0.7))",
+        padding: "16px 14px 18px",
+        overflow: "visible",
+        zIndex: 50,
       }}
     >
       <div
         style={{
           position: "relative",
-          display: "flex",
-          gap: 18,
-          alignItems: "flex-end",
-          justifyContent: "center",
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: 14,
+          alignItems: "start",
+          justifyItems: "center",
         }}
       >
         {hand.length === 0 && (
           <div
             className="mono"
-            style={{ color: "var(--ink-faint)", fontSize: 12, padding: 40 }}
+            style={{
+              gridColumn: "1 / -1",
+              color: "var(--ink-faint)",
+              fontSize: 12,
+              padding: 40,
+              textAlign: "center",
+            }}
           >
             HAND EMPTY
           </div>
@@ -1892,7 +2051,6 @@ function HandCard({
         top={info?.top}
         middle={info?.middle}
         bottom={info?.bottom}
-        tier="A"
         className={`${dragging ? "dragging" : ""}${selectable ? " is-selectable" : ""}${selected ? " is-selected" : ""}`}
         draggable={draggable && !selectable}
         onDragStart={(e) => {
@@ -2068,8 +2226,9 @@ function GameOverOverlay({
             textShadow: "0 0 22px rgba(var(--purple-glow), 0.7)",
             letterSpacing: "-0.02em",
           }}
+          title={winner.id}
         >
-          {winner.id}
+          PLAYER {winnerIdx + 1}
         </div>
         <div
           className="mono"

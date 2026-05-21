@@ -45,17 +45,19 @@ export interface CardCtxReads {
  * caller uses `yield*` to delegate to it.
  */
 export interface CardCtxOps {
-  draw(count: number, playerIdx?: PlayerIdx): Generator<Op, CardInstance[], OpResult>;
+  draw(count: number, playerIdx?: PlayerIdx, from?: "own" | "opp"): Generator<Op, CardInstance[], OpResult>;
   refresh(playerIdx?: PlayerIdx): Generator<Op, CardInstance[], OpResult>;
   discard(instanceId: string, playerIdx?: PlayerIdx): Generator<Op, CardInstance | null, OpResult>;
   delete(instanceId: string, cause?: "compile" | "effect"): Generator<Op, CardInstance | null, OpResult>;
   flip(instanceId: string): Generator<Op, { instanceId: string; nowFaceDown: boolean } | null, OpResult>;
   shift(instanceId: string, toLineIdx: LineIdx): Generator<Op, boolean, OpResult>;
   play(opts: {
-    instanceId: string;
+    instanceId?: string;
     lineIdx: LineIdx;
     faceDown: boolean;
     playerIdx?: PlayerIdx;
+    fromDeck?: boolean;
+    underInstanceId?: string;
   }): Generator<Op, CardInstance | null, OpResult>;
   return(instanceId: string, toHandOf?: PlayerIdx): Generator<Op, CardInstance | null, OpResult>;
   reveal(instanceId: string, toPlayerIdx?: PlayerIdx): Generator<Op, CardInstance | null, OpResult>;
@@ -114,8 +116,13 @@ export function createCardCtx(state: GameState, thisInstanceId: string, self: Pl
     thisCard: () => findInstance(state, thisInstanceId),
 
     // -------- Ops --------
-    *draw(count, playerIdx = self) {
-      const r = (yield { kind: "draw", playerIdx, count }) as { drawn: CardInstance[] } | undefined;
+    *draw(count, playerIdx = self, from) {
+      const r = (yield {
+        kind: "draw",
+        playerIdx,
+        count,
+        ...(from !== undefined ? { from } : {}),
+      }) as { drawn: CardInstance[] } | undefined;
       return r?.drawn ?? [];
     },
     *refresh(playerIdx = self) {
@@ -144,9 +151,13 @@ export function createCardCtx(state: GameState, thisInstanceId: string, self: Pl
       const r = (yield {
         kind: "play",
         playerIdx: opts.playerIdx ?? self,
-        instanceId: opts.instanceId,
+        ...(opts.instanceId !== undefined ? { instanceId: opts.instanceId } : {}),
         lineIdx: opts.lineIdx,
         faceDown: opts.faceDown,
+        ...(opts.fromDeck ? { fromDeck: true as const } : {}),
+        ...(opts.underInstanceId !== undefined
+          ? { underInstanceId: opts.underInstanceId }
+          : {}),
       }) as { played: CardInstance | null } | undefined;
       return r?.played ?? null;
     },

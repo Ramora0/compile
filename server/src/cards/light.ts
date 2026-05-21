@@ -11,21 +11,31 @@
 
 import { registerCard, type CardDef } from "./api.js";
 import * as h from "./helpers.js";
-import { findCardOnField, printedValue } from "../engine/field.js";
+import { cardValue, findCardOnField } from "../engine/field.js";
+import type { CardInstance } from "../engine/types.js";
 
 const light0: CardDef = {
   protocol: "light",
   value: 0,
   top: null,
   middle: function* (ctx) {
-    const id = yield* h.flipChosen(ctx, {});
+    // Snapshot the target BEFORE yielding the flip. The flip resolves any
+    // cascading middle text (which can move or delete the card outright); the
+    // "that card's value" reference should still hold even if the cascade
+    // erases the card. We compute the value the card WILL have after the flip
+    // — flipping a face-down card reveals its printed value; flipping a
+    // face-up card produces the face-down value for that line (default 2,
+    // raised to 4 by a Darkness 2 override).
+    const id = yield* h.chooseField(ctx, {}, { reason: "flip" });
     if (!id) return;
     const loc = findCardOnField(ctx.state(), id);
     if (!loc) return;
     const card = ctx.state().stacks[loc.playerIdx][loc.lineIdx].cards[loc.stackIdx];
     if (!card) return;
-    const v = card.faceDown ? 2 : printedValue(card);
-    if (v > 0) yield* ctx.draw(v);
+    const flipped: CardInstance = { ...card, faceDown: !card.faceDown };
+    const drawCount = cardValue(ctx.state(), flipped, loc.playerIdx, loc.lineIdx);
+    yield* ctx.flip(id);
+    if (drawCount > 0) yield* ctx.draw(drawCount);
   },
   bottom: null,
 };

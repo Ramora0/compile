@@ -127,8 +127,9 @@ export function ignoreMiddleFor(
     if (o.override.kind !== "ignore-middle") continue;
     const m = o.override;
     if (m.lineIdx !== lineIdx) continue;
-    if (m.ownerIdx !== ownerIdx && m.side === "self") continue;
-    if (m.ownerIdx === ownerIdx && m.side === "opp") continue;
+    // "any" side suppresses both — used by Apathy 2 ("cards in this line").
+    if (m.side === "self" && m.ownerIdx !== ownerIdx) continue;
+    if (m.side === "opp" && m.ownerIdx === ownerIdx) continue;
     return true;
   }
   return false;

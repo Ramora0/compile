@@ -71,18 +71,15 @@ describe("phase machine", () => {
     expect(g.compiledThisTurn).toBe(false);
   });
 
-  it("check-cache blocks when hand exceeds 5", () => {
+  it("check-cache advances unconditionally — Clear Cache discards are pumped by Game.tickPhase before step() lands here", () => {
+    // The discard prompt for hand > 5 is issued by the Game-level hook
+    // (see game.test.ts for the end-to-end behavior). At the step() layer,
+    // by the time we reach check-cache the runtime has already drained the
+    // discards, so step just transitions to end.
     const g = newGame();
     g.phase = "check-cache";
-    // Add a 6th card to player 0's hand to force the cache check
-    g.players[0].hand.push({
-      instanceId: "extra",
-      cardId: "spirit-0",
-      faceDown: false,
-      ownerIdx: 0,
-    });
-    const res = step(g);
-    expect(res.kind).toBe("awaiting-prompt");
+    expect(step(g).kind).toBe("advanced");
+    expect(g.phase).toBe("end");
   });
 
   it("check-cache passes through when hand <= 5", () => {
@@ -99,5 +96,24 @@ describe("phase machine", () => {
     const res = step(g);
     expect(res.kind).toBe("game-over");
     if (res.kind === "game-over") expect(res.winnerIdx).toBe(1);
+  });
+
+  it("awaiting-prompt reports the prompt's forPlayerIdx, not just the active player", () => {
+    // Opponent-targeted prompts (e.g. discardOppN) should surface the
+    // opponent as the awaiting player even though the active player owns
+    // the effect that triggered them.
+    const g = newGame();
+    g.phase = "action";
+    g.activePlayerIdx = 0;
+    g.pendingPrompt = {
+      kind: "choose-option",
+      promptId: "test-1",
+      forPlayerIdx: 1,
+      options: [{ id: "a", label: "A" }],
+      reason: "test",
+    };
+    const res = step(g);
+    expect(res.kind).toBe("awaiting-prompt");
+    if (res.kind === "awaiting-prompt") expect(res.playerIdx).toBe(1);
   });
 });

@@ -21,7 +21,7 @@ import { performCompile } from "./compile.js";
 import { applyAction, type PlayerAction } from "./actions.js";
 import { consumeControl, rearrangeProtocols } from "./control.js";
 import type { GameState, LineIdx, Phase, PlayerIdx } from "./types.js";
-import type { PromptResponse } from "./ops.js";
+import type { Op, OpResult, PromptResponse } from "./ops.js";
 
 export type EngineBlocked =
   | { kind: "awaiting-action" }
@@ -87,6 +87,20 @@ export class Game {
       this.state.phase = "end";
       return { kind: "advanced", from: "check-cache", to: "end" };
     }
+    // Clear Cache (rules.md:42): on entry to Check Cache, if hand > 5 prompt
+    // the active player to discard down to 5. Push the generator and return
+    // "advanced" so the next iteration pumps it (which suspends on the prompt).
+    if (this.state.phase === "check-cache" && !this.checkCacheTriggered) {
+      this.checkCacheTriggered = true;
+      const hand = this.state.players[this.state.activePlayerIdx].hand;
+      if (hand.length > 5) {
+        this.runtime.push(
+          "check-cache:clear",
+          clearCacheGenerator(this.state.activePlayerIdx, hand.length - 5),
+        );
+        return { kind: "advanced", from: "check-cache", to: "check-cache" };
+      }
+    }
 
     const result = step(this.state);
 
@@ -94,6 +108,9 @@ export class Game {
     if (result.kind === "advanced") {
       if (result.from === "start") this.startTriggersFired = false;
       if (result.from === "end") this.endTriggersFired = false;
+      if (result.from === "check-cache" && result.to !== "check-cache") {
+        this.checkCacheTriggered = false;
+      }
     }
 
     return result;
@@ -101,6 +118,7 @@ export class Game {
 
   private startTriggersFired = false;
   private endTriggersFired = false;
+  private checkCacheTriggered = false;
 
   private fireStartTriggers(): void {
     const triggers = collectPhaseTriggers(this.state, "start", this.state.activePlayerIdx);
@@ -134,10 +152,6 @@ export class Game {
     if (this.state.winnerIdx !== null) {
       return { kind: "game-over", winnerIdx: this.state.winnerIdx };
     }
-    // Compile is the player's only action this turn (rules.md:40).
-    if (!this.runtime.isAwaitingPrompt) {
-      this.state.phase = "check-cache";
-    }
     return this.run();
   }
 
@@ -155,6 +169,28 @@ export class Game {
   resolvePrompt(response: PromptResponse): EngineBlocked {
     this.runtime.resolvePrompt(response);
     return this.run();
+  }
+}
+
+function* clearCacheGenerator(
+  playerIdx: PlayerIdx,
+  count: number,
+): Generator<Op, void, OpResult> {
+  const resp = (yield {
+    kind: "prompt",
+    prompt: {
+      kind: "discard-selection",
+      promptId: "",
+      forPlayerIdx: playerIdx,
+      count,
+      reason: "check-cache",
+    },
+  }) as PromptResponse | undefined;
+  if (!resp || resp.kind !== "discard-chosen") {
+    throw new Error("expected discard-chosen response for check-cache");
+  }
+  for (const instanceId of resp.instanceIds) {
+    yield { kind: "discard", playerIdx, instanceId };
   }
 }
 

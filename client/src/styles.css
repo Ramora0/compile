@@ -197,8 +197,8 @@ html, body, #root {
 
 .cp-card {
   position: relative;
-  width: 188px;
-  height: 268px;
+  width: 208px;
+  height: 296px;
   border-radius: var(--r-md);
   background:
     linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.4)),
@@ -226,7 +226,7 @@ html, body, #root {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 12px 14px;
+  padding: 10px 12px;
   z-index: 2;
 }
 
@@ -249,7 +249,7 @@ html, body, #root {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 .cp-card-el {
   font-family: 'JetBrains Mono', monospace;
@@ -272,8 +272,7 @@ html, body, #root {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  margin-bottom: 8px;
+  gap: 4px;
   min-height: 0;
 }
 .cp-card-rule {
@@ -281,8 +280,7 @@ html, body, #root {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 6px 8px;
+  padding: 5px 7px;
   background: rgba(0, 0, 0, 0.32);
   border: 1px solid rgba(var(--el-rgb), 0.18);
   border-left: 2px solid rgba(var(--el-rgb), 0.45);
@@ -296,23 +294,15 @@ html, body, #root {
 .cp-card-rule.empty {
   opacity: 0.55;
 }
-.cp-card-rule-label {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 8.5px;
-  letter-spacing: 0.22em;
-  font-weight: 700;
-  color: var(--el-color);
-  text-transform: uppercase;
-}
 .cp-card-rule-body {
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 10.5px;
+  font-size: 11.5px;
   line-height: 1.22;
   color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 6;
   -webkit-box-orient: vertical;
 }
 .cp-card-rule.empty .cp-card-rule-body {
@@ -320,34 +310,72 @@ html, body, #root {
   font-style: italic;
 }
 
-.cp-card-foot {
-  margin-top: auto;
-  padding-top: 8px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  display: flex;
-  justify-content: space-between;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 8.5px;
-  letter-spacing: 0.14em;
-  color: var(--ink-faint);
-  text-transform: uppercase;
+/* field card */
+.cp-card.field { width: 140px; height: 196px; }
+.cp-card.field .cp-card-inner { padding: 7px 8px; }
+.cp-card.field .cp-card-el { font-size: 9.5px; letter-spacing: 0.14em; }
+.cp-card.field .cp-card-num { font-size: 22px; }
+.cp-card.field .cp-card-head { margin-bottom: 4px; }
+.cp-card.field .cp-card-rules { gap: 2px; }
+.cp-card.field .cp-card-rule { padding: 2px 5px; }
+.cp-card.field .cp-card-rule-body {
+  font-size: 9.5px;
+  line-height: 1.15;
+  -webkit-line-clamp: 5;
 }
 
-/* field card */
-.cp-card.field { width: 124px; height: 174px; }
-.cp-card.field .cp-card-inner { padding: 8px 9px; }
-.cp-card.field .cp-card-el { font-size: 8.5px; letter-spacing: 0.14em; }
-.cp-card.field .cp-card-num { font-size: 20px; }
-.cp-card.field .cp-card-head { margin-bottom: 5px; }
-.cp-card.field .cp-card-rules { gap: 3px; margin-bottom: 5px; }
-.cp-card.field .cp-card-rule { padding: 3px 5px; gap: 1px; }
-.cp-card.field .cp-card-rule-label { font-size: 6.5px; letter-spacing: 0.16em; }
-.cp-card.field .cp-card-rule-body {
-  font-size: 7.5px;
-  line-height: 1.12;
-  -webkit-line-clamp: 3;
+/* face-down overlay — the back of a card rendered on top of the inner face,
+   so hover-to-reveal can simply cross-fade the cover off. Used by the Card
+   component (the legacy `.cp-card.facedown` class is kept around for tiny
+   purely-cosmetic placeholders like the opponent's mini-hand). */
+.cp-card.has-facedown-cover {
+  border-color: var(--purple-500);
+  box-shadow:
+    0 0 0 1px var(--purple-500) inset,
+    0 6px 22px rgba(var(--purple-glow), 0.3);
 }
-.cp-card.field .cp-card-foot { font-size: 6.5px; padding-top: 3px; }
+.cp-card.has-facedown-cover .cp-card-inner {
+  opacity: 0;
+  transition: opacity 0.22s ease;
+}
+.cp-card-facedown-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border-radius: inherit;
+  background:
+    repeating-linear-gradient(45deg, rgba(var(--purple-glow), 0.18) 0 6px, transparent 6px 12px),
+    radial-gradient(circle at 50% 40%, rgba(var(--purple-glow), 0.4), transparent 70%),
+    var(--void-3);
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 8px 10px;
+  transition: opacity 0.22s ease;
+  pointer-events: none;
+}
+.cp-card-facedown-points {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--purple-300);
+  text-shadow: 0 0 8px rgba(var(--purple-glow), 0.7);
+}
+.cp-card.field .cp-card-facedown-cover { padding: 4px 6px; }
+.cp-card.field .cp-card-facedown-points { font-size: 20px; }
+
+/* Reveal-on-hover: opacity cross-fade. Only attached for the local player's
+   own face-down table cards — opp face-down cards never get this class. */
+.cp-card.reveal-on-hover:hover {
+  border-color: var(--el-color, var(--line-2));
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.04) inset,
+    0 0 18px rgba(var(--el-rgb, 255,255,255), 0.18),
+    var(--shadow-card);
+}
+.cp-card.reveal-on-hover:hover .cp-card-facedown-cover { opacity: 0; }
+.cp-card.reveal-on-hover:hover .cp-card-inner { opacity: 1; }
 
 /* sigil pip */
 .cp-sigil {
@@ -500,16 +528,33 @@ html, body, #root {
   opacity: 0.4;
 }
 
-/* hand-card wrapper: hover blows the card up so rules are easy to read.
-   transform-origin at bottom-center anchors growth upward into the lanes. */
+/* table-card wrapper: hover blows the card up so rules are easy to read.
+   Stacks anchor against the lane's centered headers, so cards grow outward
+   into the empty half-space: opp-side grows up, your-side grows down. z-index
+   !important wins over the inline z-index that handles natural stack layering. */
+.cp-card-slot {
+  transition: transform 0.18s ease, filter 0.18s ease;
+}
+.cp-card-slot.side-you { transform-origin: 50% 0%; }
+.cp-card-slot.side-opp { transform-origin: 50% 100%; }
+.cp-card-slot:hover {
+  transform: scale(1.85);
+  z-index: 999 !important;
+  filter: drop-shadow(0 22px 32px rgba(0, 0, 0, 0.6)) !important;
+}
+
+/* hand-card wrapper: hover blows the card up in place so rules are easy to
+   read. Hovered card lifts above lanes / right rail via z-index; the hand
+   container sets a stacking context with z-index:50 so the scaled card
+   isn't clipped or buried under the lanes. */
 .cp-hand-card {
   position: relative;
-  transform-origin: 50% 100%;
+  transform-origin: 50% 50%;
   transition: transform 0.2s ease, filter 0.2s ease;
   will-change: transform;
 }
 .cp-hand-card:hover {
-  transform: translateY(-24px) scale(1.85);
+  transform: scale(1.85);
   z-index: 1000;
   filter: drop-shadow(0 22px 32px rgba(0, 0, 0, 0.6));
 }
@@ -1003,4 +1048,106 @@ html, body, #root {
   0%   { filter: brightness(1); }
   30%  { filter: brightness(2) saturate(1.6); box-shadow: 0 0 0 2px var(--purple-300) inset, 0 0 80px rgba(var(--purple-glow), 0.9); }
   100% { filter: brightness(1); }
+}
+
+/* ─────────── active-player highlight (rail panels + turn band) ─────────── */
+
+.cp-active-panel-you {
+  border-color: var(--purple-400) !important;
+  animation: cp-active-glow-you 2.4s ease-in-out infinite;
+}
+@keyframes cp-active-glow-you {
+  0%, 100% { box-shadow: 0 0 0 1px var(--purple-500) inset, 0 0 18px rgba(var(--purple-glow), 0.30); }
+  50%      { box-shadow: 0 0 0 2px var(--purple-300) inset, 0 0 42px rgba(var(--purple-glow), 0.65); }
+}
+
+.cp-active-panel-opp {
+  border-color: var(--fire) !important;
+  animation: cp-active-glow-opp 2.4s ease-in-out infinite;
+}
+@keyframes cp-active-glow-opp {
+  0%, 100% { box-shadow: 0 0 0 1px var(--fire) inset, 0 0 18px rgba(var(--fire-rgb), 0.30); }
+  50%      { box-shadow: 0 0 0 2px var(--fire) inset, 0 0 42px rgba(var(--fire-rgb), 0.60); }
+}
+
+.cp-inactive-panel {
+  opacity: 0.55;
+  filter: saturate(0.65);
+  transition: opacity 0.35s ease, filter 0.35s ease;
+}
+
+.cp-turn-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  margin-left: 8px;
+  vertical-align: middle;
+  animation: cp-turn-badge-pulse 1.6s ease-in-out infinite;
+}
+.cp-turn-badge.you {
+  color: #fff;
+  background: var(--purple-500);
+  box-shadow: 0 0 12px rgba(var(--purple-glow), 0.7);
+}
+.cp-turn-badge.opp {
+  color: #fff;
+  background: var(--fire);
+  box-shadow: 0 0 12px rgba(var(--fire-rgb), 0.7);
+}
+@keyframes cp-turn-badge-pulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.06); }
+}
+
+.cp-turn-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.26em;
+  text-align: center;
+  transition: background 0.25s ease, border-color 0.25s ease, color 0.25s ease;
+}
+.cp-turn-status.you {
+  color: #fff;
+  background: rgba(var(--purple-glow), 0.32);
+  border: 1px solid var(--purple-300);
+  box-shadow: 0 0 0 1px rgba(var(--purple-glow), 0.5) inset, 0 0 24px rgba(var(--purple-glow), 0.45);
+  animation: cp-status-pulse-you 2.4s ease-in-out infinite;
+}
+.cp-turn-status.opp {
+  color: #fff;
+  background: rgba(var(--fire-rgb), 0.22);
+  border: 1px solid var(--fire);
+  box-shadow: 0 0 0 1px rgba(var(--fire-rgb), 0.45) inset, 0 0 24px rgba(var(--fire-rgb), 0.40);
+  animation: cp-status-pulse-opp 2.4s ease-in-out infinite;
+}
+.cp-turn-status.neutral {
+  color: var(--ink-dim);
+  background: rgba(245, 243, 255, 0.04);
+  border: 1px solid var(--line-2);
+}
+@keyframes cp-status-pulse-you {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(var(--purple-glow), 0.5) inset, 0 0 24px rgba(var(--purple-glow), 0.40); }
+  50%      { box-shadow: 0 0 0 2px var(--purple-300) inset, 0 0 40px rgba(var(--purple-glow), 0.65); }
+}
+@keyframes cp-status-pulse-opp {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(var(--fire-rgb), 0.45) inset, 0 0 24px rgba(var(--fire-rgb), 0.35); }
+  50%      { box-shadow: 0 0 0 2px var(--fire) inset, 0 0 40px rgba(var(--fire-rgb), 0.60); }
+}
+.cp-turn-arrow {
+  font-size: 18px;
+  line-height: 1;
+  display: inline-block;
 }

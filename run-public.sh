@@ -3,8 +3,8 @@
 # enabled, and open an ngrok tunnel. Public URL is printed on stdout.
 #
 # First-time setup:
-#   1. brew install ngrok               (already done if you used the helper)
-#   2. https://dashboard.ngrok.com/get-started/your-authtoken — copy your token
+#   1. brew install ngrok
+#   2. https://dashboard.ngrok.com/get-started/your-authtoken - copy your token
 #   3. ngrok config add-authtoken <token>
 #
 # Usage:
@@ -16,47 +16,78 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SERVER_PID=""
 NGROK_PID=""
+PORT="${PORT:-3000}"
 
-kill_tree() {
-  local pid="$1"
-  [[ -z "$pid" ]] && return
-  pkill -TERM -P "$pid" 2>/dev/null || true
-  if kill -0 "$pid" 2>/dev/null; then kill -TERM "$pid" 2>/dev/null || true; fi
-}
+# ── helpers ─────────────────────────────────────────────────
 
-force_kill_tree() {
-  local pid="$1"
-  [[ -z "$pid" ]] && return
-  pkill -KILL -P "$pid" 2>/dev/null || true
-  if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+# Kill anything currently bound to a TCP port. Used both pre-flight (to clean
+# up orphans from a prior crashed/Ctrl-C run) and during cleanup as a last
+# line of defence. Safe to call when nothing is listening.
+free_port() {
+  local port="$1"
+  local pids
+  pids="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)"
+  [[ -z "$pids" ]] && return 0
+  echo "  → port ${port} held by PID(s): ${pids} - terminating"
+  echo "$pids" | xargs -r kill -TERM 2>/dev/null || true
+  sleep 0.4
+  pids="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)"
+  [[ -z "$pids" ]] && return 0
+  echo "  → still holding; SIGKILL"
+  echo "$pids" | xargs -r kill -KILL 2>/dev/null || true
+  sleep 0.2
 }
 
 cleanup() {
   trap - INT TERM EXIT
-  kill_tree "$NGROK_PID"
-  kill_tree "$SERVER_PID"
+  # Direct PID kills first.
+  for pid in "$NGROK_PID" "$SERVER_PID"; do
+    [[ -z "$pid" ]] && continue
+    if kill -0 "$pid" 2>/dev/null; then kill -TERM "$pid" 2>/dev/null || true; fi
+  done
   sleep 0.3
-  force_kill_tree "$NGROK_PID"
-  force_kill_tree "$SERVER_PID"
+  for pid in "$NGROK_PID" "$SERVER_PID"; do
+    [[ -z "$pid" ]] && continue
+    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+  done
+  # Belt-and-suspenders: anything still squatting on the port goes too. This
+  # catches node children that orphan-reparented away from our subshell.
+  free_port "$PORT" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
 }
 trap cleanup INT TERM EXIT
+
+# ── pre-flight ──────────────────────────────────────────────
 
 if ! command -v ngrok >/dev/null 2>&1; then
   echo "ngrok not installed. Run: brew install ngrok" >&2
   exit 1
 fi
 
-PORT="${PORT:-3000}"
+echo "[pre] Checking port ${PORT} is free"
+free_port "$PORT"
 
-echo "[1/3] Building client for same-origin hosting..."
+# ── build ───────────────────────────────────────────────────
+
+echo "[1/3] Building client for same-origin hosting"
 (cd "$SCRIPT_DIR/client" && VITE_SERVER_URL='' ./node_modules/.bin/vite build) >/dev/null
 
 CLIENT_DIST="$SCRIPT_DIR/client/dist"
 if [[ ! -f "$CLIENT_DIST/index.html" ]]; then
-  echo "✗ client build missing $CLIENT_DIST/index.html" >&2
+  echo "client build missing ${CLIENT_DIST}/index.html" >&2
   exit 1
 fi
+
+echo "[1/3] Building server (tsc)"
+(cd "$SCRIPT_DIR/server" && ./node_modules/.bin/tsc -p tsconfig.json) >/dev/null
+
+SERVER_ENTRY="$SCRIPT_DIR/server/dist/server/index.js"
+if [[ ! -f "$SERVER_ENTRY" ]]; then
+  echo "server build missing ${SERVER_ENTRY}" >&2
+  exit 1
+fi
+
+# ── start server (plain node, no tsx fork - clean kill on signal) ──
 
 echo "[2/3] Starting server on :${PORT} (serving client from ${CLIENT_DIST})"
 (
@@ -64,17 +95,24 @@ echo "[2/3] Starting server on :${PORT} (serving client from ${CLIENT_DIST})"
   STATIC_CLIENT_DIR="$CLIENT_DIST" \
     PORT="$PORT" \
     CORS_ORIGIN="*" \
-    exec ./node_modules/.bin/tsx src/server/index.ts
+    exec node "$SERVER_ENTRY"
 ) &
 SERVER_PID=$!
 
 # Wait for the health endpoint to respond before opening the tunnel.
-for _ in $(seq 1 20); do
-  if curl -fs "http://localhost:$PORT/health" >/dev/null 2>&1; then break; fi
+for _ in $(seq 1 40); do
+  if curl -fs "http://localhost:${PORT}/health" >/dev/null 2>&1; then break; fi
   sleep 0.25
 done
 
-echo "[3/3] Starting ngrok tunnel on :${PORT}..."
+if ! curl -fs "http://localhost:${PORT}/health" >/dev/null 2>&1; then
+  echo "server failed to come up on :${PORT}" >&2
+  exit 1
+fi
+
+# ── start ngrok ─────────────────────────────────────────────
+
+echo "[3/3] Starting ngrok tunnel on :${PORT}"
 ngrok http "$PORT" --log=stdout --log-format=json >/tmp/compile-ngrok.log 2>&1 &
 NGROK_PID=$!
 
@@ -95,22 +133,23 @@ except Exception:
 done
 
 if [[ -z "$PUBLIC_URL" ]]; then
-  echo "✗ ngrok didn't produce a public URL. Check /tmp/compile-ngrok.log" >&2
-  echo "  Common causes: missing authtoken (ngrok config add-authtoken <token>)" >&2
+  echo "ngrok did not produce a public URL. Check /tmp/compile-ngrok.log" >&2
+  echo "Common cause: missing authtoken. Fix:" >&2
+  echo "  ngrok config add-authtoken <token-from-https://dashboard.ngrok.com>" >&2
   tail -n 20 /tmp/compile-ngrok.log >&2 || true
   exit 1
 fi
 
 cat <<EOF
 
-────────────────────────────────────────────────────────────
-  Public URL:  $PUBLIC_URL
+============================================================
+  Public URL:  ${PUBLIC_URL}
   Share that link with your opponent. Ctrl+C to stop.
-────────────────────────────────────────────────────────────
+============================================================
 
 EOF
 
-# Stay alive until either child dies.
+# Stay alive until either child dies. macOS bash 3.2 lacks "wait -n".
 while kill -0 "$SERVER_PID" 2>/dev/null && kill -0 "$NGROK_PID" 2>/dev/null; do
   sleep 1
 done

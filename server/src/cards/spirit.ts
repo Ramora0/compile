@@ -45,6 +45,14 @@ const spirit1: CardDef = {
     kind: "trigger-phase",
     phase: "start",
     resolve: function* (ctx) {
+      // "Either discard 1 card or flip this card." With an empty hand the
+      // "discard" option can't be honoured, so the choice collapses to flip.
+      // Without this guard the player could pick "discard", silently no-op,
+      // and dodge both clauses.
+      if (ctx.myHand().length === 0) {
+        yield* ctx.flip(ctx.thisInstanceId);
+        return;
+      }
       const choice = yield* ctx.promptOption({
         options: [
           { id: "discard", label: "Discard 1" },

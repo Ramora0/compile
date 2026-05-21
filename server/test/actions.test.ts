@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { newGame } from "./helpers/harness.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { newGame, placeCard } from "./helpers/harness.js";
 import { Game } from "../src/engine/game.js";
 import { applyAction, validateAction } from "../src/engine/actions.js";
+import { registerMockCard, resetCardRegistry } from "./helpers/mockCards.js";
 
 describe("validateAction", () => {
   it("rejects actions submitted by the inactive player", () => {
@@ -87,5 +88,83 @@ describe("applyAction → play", () => {
     expect(g.players[0].hand.find((c) => c.instanceId === card.instanceId)).toBeUndefined();
     expect(g.stacks[0][matchingLine].cards[0]?.instanceId).toBe(card.instanceId);
     expect(g.phase).toBe("check-cache");
+  });
+});
+
+describe("Game.run → Clear Cache", () => {
+  afterEach(() => resetCardRegistry());
+
+
+  it("issues a discard-selection prompt when hand > 5 on entry to check-cache", () => {
+    const g = newGame();
+    g.phase = "check-cache";
+    g.players[0].hand.push(
+      { instanceId: "x1", cardId: "spirit-0", faceDown: false, ownerIdx: 0 },
+      { instanceId: "x2", cardId: "spirit-0", faceDown: false, ownerIdx: 0 },
+    );
+    expect(g.players[0].hand.length).toBe(7);
+    const game = new Game(g);
+    const blocked = game.run();
+    expect(blocked.kind).toBe("awaiting-prompt");
+    expect(g.pendingPrompt).not.toBeNull();
+    expect(g.pendingPrompt?.kind).toBe("discard-selection");
+    expect(g.pendingPrompt?.forPlayerIdx).toBe(0);
+    if (g.pendingPrompt?.kind === "discard-selection") {
+      expect(g.pendingPrompt.count).toBe(2);
+    }
+  });
+
+  it("applies the picked discards and advances past check-cache when the prompt resolves", () => {
+    const g = newGame();
+    g.phase = "check-cache";
+    g.players[0].hand.push(
+      { instanceId: "x1", cardId: "spirit-0", faceDown: false, ownerIdx: 0 },
+      { instanceId: "x2", cardId: "spirit-0", faceDown: false, ownerIdx: 0 },
+    );
+    const game = new Game(g);
+    game.run();
+    const promptId = g.pendingPrompt!.promptId;
+    const blocked = game.resolvePrompt({
+      kind: "discard-chosen",
+      promptId,
+      instanceIds: ["x1", "x2"],
+    });
+    // Discards landed in trash; hand is back to 5.
+    expect(g.players[0].hand.length).toBe(5);
+    expect(g.players[0].trash.map((c) => c.instanceId)).toEqual(
+      expect.arrayContaining(["x1", "x2"]),
+    );
+    // And we've moved off check-cache — either turn ended (start of opponent's
+    // turn) or we're blocked on the opponent's action phase.
+    expect(g.phase === "action" || g.phase === "start").toBe(true);
+    expect(blocked.kind === "awaiting-action" || blocked.kind === "awaiting-prompt").toBe(true);
+  });
+
+  it("respects skip-phase override (Spirit 0 bottom) and does not prompt", () => {
+    // Register a mock spirit-0 whose bottom skips check-cache for its owner.
+    registerMockCard({
+      protocol: "spirit",
+      value: 0,
+      top: null,
+      middle: null,
+      bottom: {
+        kind: "static-rule",
+        apply: (ctx) => ({ kind: "skip-phase", phase: "check-cache", ownerIdx: ctx.self }),
+      },
+    });
+    const g = newGame();
+    // Plant the mock card face-up and uncovered on p0's side.
+    placeCard(g, 0, 0, "spirit-0", false);
+    g.phase = "check-cache";
+    g.players[0].hand.push(
+      { instanceId: "x1", cardId: "spirit-0", faceDown: false, ownerIdx: 0 },
+      { instanceId: "x2", cardId: "spirit-0", faceDown: false, ownerIdx: 0 },
+    );
+    const game = new Game(g);
+    const blocked = game.run();
+    expect(g.pendingPrompt).toBeNull();
+    // Hand stays over the limit because the phase was skipped.
+    expect(g.players[0].hand.length).toBe(7);
+    expect(blocked.kind).not.toBe("awaiting-prompt");
   });
 });

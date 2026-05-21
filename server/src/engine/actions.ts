@@ -8,7 +8,7 @@
  */
 
 import type { GameState, LineIdx, PlayerIdx } from "./types.js";
-import type { Op } from "./ops.js";
+import type { Op, OpResult } from "./ops.js";
 import type { EffectRuntime } from "./runtime.js";
 import { lineOfProtocol } from "./field.js";
 import { playRestrictedFor, playAnywhereFor } from "./reactive/index.js";
@@ -61,8 +61,13 @@ export function validateAction(state: GameState, playerIdx: PlayerIdx, action: P
 }
 
 /**
- * Apply the action to state via the runtime. Returns once the action's
- * synchronous effect chain has been pumped (or a prompt suspends).
+ * Apply the action to state via the runtime. The action's outer generator
+ * sits at the bottom of the runtime's LIFO stack — every interrupt (middle
+ * text, replacement/reactive triggers, prompts) pushes above it. The frame
+ * only resumes once all interrupts have drained, at which point it advances
+ * phase to check-cache. This matches rules.md:100 ("interrupts any other
+ * text until it is resolved, LIFO") rather than the previous shape, which
+ * advanced phase only when the *first* synchronous pump returned promptless.
  *
  * Note: rearrange-on-Compile/Refresh (rules.md:51, :57) is handled OUTSIDE
  * this function — the server collects the rearrange decision before calling
@@ -77,29 +82,30 @@ export function applyAction(
   validateAction(state, playerIdx, action);
 
   if (action.kind === "refresh") {
-    runtime.push("action:refresh", refreshGenerator(playerIdx));
+    runtime.push("action:refresh", refreshGenerator(state, playerIdx));
   } else {
-    runtime.push("action:play", playGenerator(playerIdx, action.instanceId, action.lineIdx, action.faceDown));
+    runtime.push(
+      "action:play",
+      playGenerator(state, playerIdx, action.instanceId, action.lineIdx, action.faceDown),
+    );
   }
   runtime.pump();
-
-  // If still no prompt, advance phase to check-cache.
-  if (!runtime.isAwaitingPrompt) {
-    state.phase = "check-cache";
-  }
 }
 
-function* refreshGenerator(playerIdx: PlayerIdx): Generator<Op, void, unknown> {
+function* refreshGenerator(state: GameState, playerIdx: PlayerIdx): Generator<Op, void, OpResult> {
   yield { kind: "refresh", playerIdx };
+  state.phase = "check-cache";
 }
 
 function* playGenerator(
+  state: GameState,
   playerIdx: PlayerIdx,
   instanceId: string,
   lineIdx: LineIdx,
   faceDown: boolean,
-): Generator<Op, void, unknown> {
+): Generator<Op, void, OpResult> {
   yield { kind: "play", playerIdx, instanceId, lineIdx, faceDown };
+  state.phase = "check-cache";
 }
 
 export { consumeControl };

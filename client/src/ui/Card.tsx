@@ -5,11 +5,12 @@ export interface CardProps {
   el: string;
   num?: number | string;
   faceDown?: boolean;
+  /** When face-down: hovering reveals the front via cross-fade. Use for the
+   *  local player's own face-down table cards; never set on the opponent's. */
+  revealOnHover?: boolean;
   top?: string;
   middle?: string;
   bottom?: string;
-  tier?: "A" | "B";
-  line?: number | null;
   size?: "hand" | "field";
   className?: string;
   style?: CSSProperties;
@@ -25,11 +26,10 @@ export function Card({
   el,
   num,
   faceDown,
+  revealOnHover,
   top,
   middle,
   bottom,
-  tier = "B",
-  line,
   size = "hand",
   className = "",
   style,
@@ -42,24 +42,19 @@ export function Card({
 }: CardProps) {
   const sizeCls = size === "field" ? "field" : "";
   const handlers = { onMouseEnter, onMouseLeave, onClick, onDragStart, onDragEnd };
+  const classes = [
+    "cp-card",
+    sizeCls,
+    elClass(el),
+    faceDown ? "has-facedown-cover" : "",
+    faceDown && revealOnHover ? "reveal-on-hover" : "",
+    className,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
-  if (faceDown) {
-    return (
-      <div
-        className={`cp-card facedown ${sizeCls} ${className}`}
-        style={style}
-        draggable={draggable}
-        {...handlers}
-      />
-    );
-  }
   return (
-    <div
-      className={`cp-card ${sizeCls} ${elClass(el)} ${className}`}
-      style={style}
-      draggable={draggable}
-      {...handlers}
-    >
+    <div className={classes} style={style} draggable={draggable} {...handlers}>
       <div className="cp-card-inner">
         <div className="cp-card-head">
           <div className="cp-card-el">{el}</div>
@@ -67,33 +62,30 @@ export function Card({
         </div>
 
         <div className="cp-card-rules">
-          <RuleSection label="TOP" body={top} />
-          <RuleSection label="MID" body={middle} accent />
-          <RuleSection label="BTM" body={bottom} />
-        </div>
-
-        <div className="cp-card-foot">
-          <span>TIER {tier}</span>
-          <span>{line != null ? `→ L${line}` : "PROTOCOL"}</span>
+          <RuleSection body={top} />
+          <RuleSection body={middle} accent />
+          <RuleSection body={bottom} />
         </div>
       </div>
+      {faceDown && (
+        <div className="cp-card-facedown-cover" aria-hidden="true">
+          <span className="cp-card-facedown-points">2</span>
+        </div>
+      )}
     </div>
   );
 }
 
 function RuleSection({
-  label,
   body,
   accent,
 }: {
-  label: string;
   body?: string;
   accent?: boolean;
 }) {
   const hasBody = !!body && body.trim().length > 0;
   return (
     <div className={`cp-card-rule${accent ? " accent" : ""}${hasBody ? "" : " empty"}`}>
-      <span className="cp-card-rule-label">{label}</span>
       <span className="cp-card-rule-body">{hasBody ? body : "—"}</span>
     </div>
   );

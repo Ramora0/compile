@@ -19,11 +19,14 @@ const gravity0: CardDef = {
   middle: function* (ctx) {
     const thisLine = h.lineOfThis(ctx);
     if (thisLine === null) return;
+    // Count includes Gravity 0 itself (it's already on the stack when middle
+    // resolves), matching the rules-text reading of "cards in this line".
     const count = h.lineSizeBothSides(ctx.state(), thisLine);
     const plays = Math.floor(count / 2);
     for (let i = 0; i < plays; i++) {
-      // note: "under this card" not yet engine-supported; played on top of stack
-      yield* h.playTopOfDeckFaceDown(ctx, ctx.self, thisLine);
+      // "under this card" — Gravity 0 stays on top while each new card lands
+      // beneath it, covered from the moment it arrives.
+      yield* h.playTopOfDeckFaceDown(ctx, ctx.self, thisLine, ctx.thisInstanceId);
     }
   },
   bottom: null,

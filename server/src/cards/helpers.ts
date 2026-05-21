@@ -16,7 +16,7 @@
 import type { CardCtxFull } from "../engine/ctx.js";
 import type { CardFilter, Op, OpResult } from "../engine/ops.js";
 import type { CardInstance, GameState, LineIdx, PlayerIdx, Side } from "../engine/types.js";
-import { findCardOnField, printedValue } from "../engine/field.js";
+import { cardValue, findCardOnField, printedValue } from "../engine/field.js";
 import { rearrangeProtocols } from "../engine/control.js";
 
 export type Eff<T = void> = Generator<Op, T, OpResult>;
@@ -113,6 +113,14 @@ export interface FieldFilter {
   excludeInstanceId?: string;
   /** Match face-up printed value in this set. Excludes face-down cards. */
   printedValueIn?: number[];
+  /**
+   * Match the card's *effective* value in this set — printed value for face-up
+   * cards, the face-down value (default 2; Darkness 2 makes face-down cards
+   * worth 4 in its line) for face-down cards. Use this for rules text like
+   * "all cards with a value of 2" (Water 3) or "values of 1 or 2" (Death 2)
+   * that the rulebook reads as referring to current value, not just printed.
+   */
+  valueIn?: number[];
   /** Custom predicate — applied last. */
   where?: (e: FieldEntry) => boolean;
 }
@@ -132,6 +140,10 @@ export function filterField(ctx: CardCtxFull, f: FieldFilter): FieldEntry[] {
     if (f.printedValueIn) {
       if (card.faceDown) return false;
       if (!f.printedValueIn.includes(printedValue(card))) return false;
+    }
+    if (f.valueIn) {
+      const v = cardValue(ctx.state(), card, playerIdx, lineIdx);
+      if (!f.valueIn.includes(v)) return false;
     }
     if (f.where && !f.where(e)) return false;
     return true;
@@ -212,9 +224,16 @@ export function* shiftChosen(
   return id;
 }
 
-/** Reveal a face-down card to self, then optionally shift OR flip it. (Light 2) */
+/**
+ * Reveal a face-down card to self, then optionally shift OR flip it. (Light 2)
+ *
+ * The reveal itself is *mandatory* whenever a matching card exists — only the
+ * follow-up shift/flip is "you may". If no card matches (e.g. opponent has no
+ * face-down cards) the helper silently skips, matching how other selection
+ * helpers degrade when there are no candidates.
+ */
 export function* revealThenMayShiftOrFlip(ctx: CardCtxFull, filter: FieldFilter): Eff {
-  const id = yield* chooseField(ctx, filter, { reason: "reveal", optional: true });
+  const id = yield* chooseField(ctx, filter, { reason: "reveal", optional: false });
   if (!id) return;
   yield* ctx.reveal(id);
   const choice = yield* ctx.promptOption({
@@ -335,13 +354,30 @@ export function takeRandomFromOpp(state: GameState, takerIdx: PlayerIdx): CardIn
 
 /**
  * "Give 1 card from your hand to your opponent." Optional. Returns true if a
- * card was given. Used by Love 1, Love 3.
+ * card was given. Used by Love 1's bottom ("You may give...").
  */
 export function* mayGiveOneToOpp(ctx: CardCtxFull, reason = "give"): Eff<boolean> {
   if (ctx.myHand().length === 0) return false;
   const id = yield* ctx.promptCard({
     filter: filterByIds(ctx.myHand().map((c) => c.instanceId)),
     optional: true,
+    reason,
+  });
+  if (!id) return false;
+  moveCardBetweenHands(ctx.state(), ctx.self, ctx.opp, id);
+  return true;
+}
+
+/**
+ * "Give 1 card from your hand to your opponent." Mandatory (Love 3) — the
+ * player must choose a card if their hand has any. Silently skips when the
+ * hand is empty.
+ */
+export function* giveOneToOpp(ctx: CardCtxFull, reason = "give"): Eff<boolean> {
+  if (ctx.myHand().length === 0) return false;
+  const id = yield* ctx.promptCard({
+    filter: filterByIds(ctx.myHand().map((c) => c.instanceId)),
+    optional: false,
     reason,
   });
   if (!id) return false;
@@ -371,17 +407,28 @@ export function* revealOneFromOwnHand(ctx: CardCtxFull): Eff<string | null> {
 
 // ===================== Deck-top play =====================
 
-/** Play the top card of `playerIdx`'s deck face-down into `lineIdx` on their side. */
+/**
+ * Play the top card of `playerIdx`'s deck face-down into `lineIdx` on their side.
+ *
+ * `underInstanceId` slots the new card beneath the named anchor (Gravity 0's
+ * "play face-down under this card"); the anchor must be in the same side+line.
+ */
 export function* playTopOfDeckFaceDown(
   ctx: CardCtxFull,
   playerIdx: PlayerIdx,
   lineIdx: LineIdx,
+  underInstanceId?: string,
 ): Eff<CardInstance | null> {
-  const drew = yield* ctx.draw(1, playerIdx);
-  if (drew.length === 0) return null;
-  const top = drew[0]!;
-  const r = yield* ctx.play({ instanceId: top.instanceId, lineIdx, faceDown: true, playerIdx });
-  return r;
+  // The card moves deck → field directly. Sourcing through hand would fire
+  // after-draw reactives (e.g. Spirit 3) that the rules don't intend for
+  // "play the top card of your deck" effects.
+  return yield* ctx.play({
+    playerIdx,
+    lineIdx,
+    faceDown: true,
+    fromDeck: true,
+    ...(underInstanceId !== undefined ? { underInstanceId } : {}),
+  });
 }
 
 // ===================== Protocols =====================
@@ -423,14 +470,20 @@ export function* rearrangeProtocolsPrompt(ctx: CardCtxFull, side: PlayerIdx): Ef
 
 export const sides: readonly Side[] = ["self", "opp"];
 
-/** Highest face-up printed value among `playerIdx`'s field cards. Face-down excluded. */
+/**
+ * Highest *effective* value card among `playerIdx`'s field cards (Hate 2).
+ * Face-down cards count too — at the default 2 unless a face-down-value
+ * override (Darkness 2's top makes face-down cards in its line worth 4) bumps
+ * them higher. Returning null only happens when the player has no field cards.
+ */
 export function highestValueCardOf(state: GameState, playerIdx: PlayerIdx): CardInstance | null {
   let best: CardInstance | null = null;
   let bestVal = -1;
-  for (const stack of state.stacks[playerIdx]) {
+  for (let l = 0; l < state.stacks[playerIdx].length; l++) {
+    const lineIdx = l as LineIdx;
+    const stack = state.stacks[playerIdx][lineIdx];
     for (const c of stack.cards) {
-      if (c.faceDown) continue;
-      const v = printedValue(c);
+      const v = cardValue(state, c, playerIdx, lineIdx);
       if (v > bestVal) {
         best = c;
         bestVal = v;
@@ -451,10 +504,35 @@ export function lowestCoveredOfLine(
   let bestVal = Infinity;
   for (let i = 0; i < stack.length - 1; i++) {
     const c = stack[i]!;
-    const v = c.faceDown ? 2 : printedValue(c);
+    const v = cardValue(state, c, playerIdx, lineIdx);
     if (v < bestVal) {
       best = c;
       bestVal = v;
+    }
+  }
+  return best;
+}
+
+/**
+ * Lowest-value covered card across BOTH sides of a line (Hate 4: "this line"
+ * includes the opponent's stack). Face-down value resolves via cardValue, so a
+ * Darkness 2 override on a face-down card raises it to 4.
+ */
+export function lowestCoveredInLine(
+  state: GameState,
+  lineIdx: LineIdx,
+): CardInstance | null {
+  let best: CardInstance | null = null;
+  let bestVal = Infinity;
+  for (const p of [0, 1] as const) {
+    const stack = state.stacks[p][lineIdx].cards;
+    for (let i = 0; i < stack.length - 1; i++) {
+      const c = stack[i]!;
+      const v = cardValue(state, c, p, lineIdx);
+      if (v < bestVal) {
+        best = c;
+        bestVal = v;
+      }
     }
   }
   return best;

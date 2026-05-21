@@ -156,6 +156,39 @@ describe("reactive after-action triggers", () => {
     expect(fired).toBe(1);
   });
 
+  it("after-draw does NOT fire when a card is played directly from deck (fromDeck=true)", () => {
+    // "Play the top card of your deck face-down" is a play action, not a
+    // draw — the card moves deck → field without ever entering hand.
+    // Spirit 3 ("After you draw cards: shift this") must not fire.
+    let fired = 0;
+    registerMockCard({
+      protocol: "death",
+      value: 1,
+      top: null,
+      middle: null,
+      bottom: {
+        kind: "trigger-reactive",
+        on: "after-draw",
+        scope: "self",
+        resolve: function* () {
+          fired++;
+        },
+      },
+    });
+    const g = newGame();
+    placeCard(g, 0, 1, "death-1");
+    recomputeOverrides(g);
+    const rt = new EffectRuntime(g);
+    const handBefore = g.players[0].hand.length;
+    function* effect(): Generator<Op, void, OpResult> {
+      yield { kind: "play", playerIdx: 0, lineIdx: 0, faceDown: true, fromDeck: true };
+    }
+    rt.push("test", effect());
+    rt.pump();
+    expect(fired).toBe(0);
+    expect(g.players[0].hand.length).toBe(handBefore);
+  });
+
   it("scope=opp only fires when the opponent of the source player is the actor", () => {
     let fired = 0;
     registerMockCard({

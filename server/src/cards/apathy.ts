@@ -21,9 +21,20 @@ const apathy0: CardDef = {
   top: {
     kind: "static-rule",
     apply: (ctx) => {
+      // visiblePassives only walks the field, so `lineOf` returns non-null in
+      // every real call. The defensive line=0 + delta=0 branch keeps the
+      // override inert if a future caller ever invokes apply() off-field.
       const line = lineOf(ctx.state, ctx.thisInstanceId);
-      // Default to line 0 if not yet on field; override stays harmless until placed.
-      const lineIdx: LineIdx = line ?? 0;
+      if (line === null) {
+        return {
+          kind: "value-modifier",
+          lineIdx: 0,
+          side: "self",
+          ownerIdx: ctx.self,
+          delta: () => 0,
+        };
+      }
+      const lineIdx: LineIdx = line;
       return {
         kind: "value-modifier",
         lineIdx,
@@ -66,8 +77,8 @@ const apathy2: CardDef = {
     apply: (ctx) => {
       const line = lineOf(ctx.state, ctx.thisInstanceId);
       const lineIdx: LineIdx = line ?? 0;
-      // Apply to both sides of the line — "cards in this line" includes opp.
-      return { kind: "ignore-middle", lineIdx, side: "self", ownerIdx: ctx.self };
+      // "Ignore all middle commands of cards in this line" — both sides.
+      return { kind: "ignore-middle", lineIdx, side: "any", ownerIdx: ctx.self };
     },
   },
   middle: null,

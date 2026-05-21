@@ -90,13 +90,14 @@ const plague4: CardDef = {
     kind: "trigger-phase",
     phase: "end",
     resolve: function* (ctx) {
-      const id = yield* ctx.promptCard({
-        filter: { ownerIdx: ctx.opp, faceDown: true, side: "opp" },
-        optional: false,
-        reason: "plague-4-opp-delete",
-        forPlayerIdx: ctx.opp,
-      });
-      if (id) yield* ctx.delete(id);
+      // deleteChosen silently skips when no candidates exist — important here
+      // because the opponent might have no face-down cards. The opponent picks
+      // the card to delete (forPlayerIdx: ctx.opp).
+      yield* h.deleteChosen(
+        ctx,
+        { side: "opp", faceDown: true },
+        { reason: "plague-4-opp-delete", forPlayerIdx: ctx.opp },
+      );
       const choice = yield* ctx.promptOption({
         options: [
           { id: "yes", label: "Flip Plague 4" },

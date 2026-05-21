@@ -35,6 +35,79 @@ describe("EffectRuntime — basic Ops", () => {
     expect(g.players[0].hand.length).toBe(6);
   });
 
+  it("draw with from: 'opp' pulls from opponent's deck and transfers ownership", () => {
+    const g = newGame();
+    const oppDeckSize = g.players[1].deck.length;
+    const oppTop = g.players[1].deck[oppDeckSize - 1]!;
+    expect(oppTop.ownerIdx).toBe(1);
+    const myHandBefore = g.players[0].hand.length;
+    function* effect(): Generator<Op, void, OpResult> {
+      yield { kind: "draw", playerIdx: 0, count: 1, from: "opp" };
+    }
+    runner(g, effect());
+    expect(g.players[1].deck.length).toBe(oppDeckSize - 1);
+    expect(g.players[0].hand.length).toBe(myHandBefore + 1);
+    const drawn = g.players[0].hand.find((c) => c.instanceId === oppTop.instanceId)!;
+    expect(drawn).toBeDefined();
+    expect(drawn.ownerIdx).toBe(0);
+  });
+
+  it("draw with from: 'opp' reshuffles opp's trash into opp's deck when empty", () => {
+    const g = newGame();
+    // Empty opp's deck; move all into their trash.
+    g.players[1].trash = g.players[1].deck.splice(0);
+    const trashedSize = g.players[1].trash.length;
+    function* effect(): Generator<Op, void, OpResult> {
+      yield { kind: "draw", playerIdx: 0, count: 1, from: "opp" };
+    }
+    runner(g, effect());
+    expect(g.players[1].trash.length).toBe(0);
+    expect(g.players[1].deck.length).toBe(trashedSize - 1);
+    expect(g.players[0].hand.length).toBe(6);
+  });
+
+  it("play with fromDeck: true pulls from the deck without touching the hand", () => {
+    const g = newGame();
+    const handBefore = g.players[0].hand.length;
+    const deckSize = g.players[0].deck.length;
+    const top = g.players[0].deck[deckSize - 1]!;
+    function* effect(): Generator<Op, void, OpResult> {
+      yield { kind: "play", playerIdx: 0, lineIdx: 0, faceDown: true, fromDeck: true };
+    }
+    runner(g, effect());
+    expect(g.players[0].hand.length).toBe(handBefore);
+    expect(g.players[0].deck.length).toBe(deckSize - 1);
+    const landed = g.stacks[0][0].cards.at(-1);
+    expect(landed?.instanceId).toBe(top.instanceId);
+    expect(landed?.faceDown).toBe(true);
+  });
+
+  it("play with fromDeck: true reshuffles trash into deck when deck is empty", () => {
+    const g = newGame();
+    g.players[0].trash = g.players[0].deck.splice(0);
+    const trashedSize = g.players[0].trash.length;
+    function* effect(): Generator<Op, void, OpResult> {
+      yield { kind: "play", playerIdx: 0, lineIdx: 1, faceDown: true, fromDeck: true };
+    }
+    runner(g, effect());
+    expect(g.players[0].trash.length).toBe(0);
+    expect(g.players[0].deck.length).toBe(trashedSize - 1);
+    expect(g.stacks[0][1].cards.length).toBe(1);
+  });
+
+  it("play with fromDeck: true returns played: null when both deck and trash are empty", () => {
+    const g = newGame();
+    g.players[0].deck = [];
+    g.players[0].trash = [];
+    let result: { played: { instanceId: string } | null } | undefined;
+    function* effect(): Generator<Op, void, OpResult> {
+      result = (yield { kind: "play", playerIdx: 0, lineIdx: 0, faceDown: true, fromDeck: true }) as typeof result;
+    }
+    runner(g, effect());
+    expect(result?.played).toBeNull();
+    expect(g.stacks[0][0].cards.length).toBe(0);
+  });
+
   it("discard moves a specific card from hand to trash", () => {
     const g = newGame();
     const target = g.players[0].hand[0]!;

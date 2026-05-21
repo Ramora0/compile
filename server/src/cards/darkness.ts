@@ -34,8 +34,6 @@ const darkness1: CardDef = {
   middle: function* (ctx) {
     const id = yield* h.flipChosen(ctx, { side: "opp" });
     if (!id) return;
-    const loc = findCardOnField(ctx.state(), id);
-    if (!loc) return;
     const choice = yield* ctx.promptOption({
       options: [
         { id: "yes", label: "Shift it" },
@@ -44,6 +42,11 @@ const darkness1: CardDef = {
       reason: "darkness1-shift",
     });
     if (choice !== "yes") return;
+    // Re-read the card's location AFTER the flip and prompt — the flip could
+    // have cascaded into middles that moved or deleted it; treat "card no
+    // longer on the field" as a silent no-op.
+    const loc = findCardOnField(ctx.state(), id);
+    if (!loc) return;
     const allowed: LineIdx[] = ([0, 1, 2] as LineIdx[]).filter((l) => l !== loc.lineIdx);
     if (allowed.length === 0) return;
     const toLine = yield* ctx.promptLine({ allowedLines: allowed, reason: "shift-to" });

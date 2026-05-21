@@ -71,6 +71,13 @@ export function step(state: GameState): StepResult {
     }
 
     case "check-compile": {
+      // Metal 1 rider: "Your opponent cannot compile next turn." Consume one
+      // ban-turn and skip the phase entirely, even if compilable lines exist.
+      if (state.compileBans[state.activePlayerIdx] > 0) {
+        state.compileBans[state.activePlayerIdx]--;
+        log(state, { type: "compile-banned", playerIdx: state.activePlayerIdx });
+        return advanceTo(state, "action");
+      }
       const lines = compilableLines(state, state.activePlayerIdx);
       if (lines.length === 0) {
         return advanceTo(state, "action");
@@ -85,11 +92,10 @@ export function step(state: GameState): StepResult {
     }
 
     case "check-cache": {
-      const hand = state.players[state.activePlayerIdx].hand;
-      if (hand.length <= 5) return advanceTo(state, "end");
-      // Hook: prompt for discards (Phase 5). For now: signal awaiting-prompt
-      // by setting a placeholder until prompts are real.
-      return { kind: "awaiting-prompt", playerIdx: state.activePlayerIdx };
+      // Game.tickPhase fires the Clear Cache discard generator on entry to
+      // this phase; by the time we land here the runtime has resolved it and
+      // hand is ≤ 5. Advance unconditionally.
+      return advanceTo(state, "end");
     }
 
     case "end": {
@@ -124,8 +130,7 @@ function log(state: GameState, ev: Record<string, unknown> & { type: string }): 
 }
 
 function targetOfPrompt(state: GameState): PlayerIdx {
-  // pendingPrompt shape lands in Phase 5; until then default to active player.
-  return state.activePlayerIdx;
+  return state.pendingPrompt?.forPlayerIdx ?? state.activePlayerIdx;
 }
 
 /**

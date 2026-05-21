@@ -36,8 +36,12 @@ const fire1: CardDef = {
   value: 1,
   top: null,
   middle: function* (ctx) {
-    const did = yield* h.mayDiscardSelfN(ctx, 1, "fire-1");
-    if (did) yield* h.deleteChosen(ctx, {});
+    // "Discard 1 card. If you do, delete 1 card." The discard is mandatory
+    // whenever the hand has cards; "if you do" only gates the delete in the
+    // empty-hand case (where you can't discard at all).
+    if (ctx.myHand().length === 0) return;
+    yield* h.discardSelfN(ctx, 1);
+    yield* h.deleteChosen(ctx, {});
   },
   bottom: null,
 };
@@ -47,8 +51,10 @@ const fire2: CardDef = {
   value: 2,
   top: null,
   middle: function* (ctx) {
-    const did = yield* h.mayDiscardSelfN(ctx, 1, "fire-2");
-    if (did) yield* h.returnChosen(ctx, {});
+    // "Discard 1 card. If you do, return 1 card." Same shape as Fire 1.
+    if (ctx.myHand().length === 0) return;
+    yield* h.discardSelfN(ctx, 1);
+    yield* h.returnChosen(ctx, {});
   },
   bottom: null,
 };

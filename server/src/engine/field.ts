@@ -14,7 +14,6 @@ import type {
   LineIdx,
   LineSnapshot,
   PlayerIdx,
-  RuleOverride,
   Side,
 } from "./types.js";
 
@@ -220,12 +219,6 @@ export function lineOfProtocol(
     if (slots[l].protocol === protocol) return l;
   }
   return null;
-}
-
-/** All overrides whose source instance is no longer eligible — to be detached by the reactive layer. */
-export function staleOverrides(state: GameState): RuleOverride[] {
-  // Implemented in Phase 7 once reactive lifecycle is wired up.
-  return [];
 }
 
 export type { Side };

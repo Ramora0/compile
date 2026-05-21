@@ -26,6 +26,13 @@ export interface DrawOp {
   kind: "draw";
   playerIdx: PlayerIdx;
   count: number;
+  /**
+   * Source deck. "own" (default) — draw from playerIdx's own deck.
+   * "opp" — draw the top of the other player's deck into playerIdx's hand
+   * (used by recompile and Love 1). Drawing from opp transfers ownership
+   * of the card to the receiver (rules.md:106).
+   */
+  from?: "own" | "opp";
 }
 export interface DiscardOp {
   kind: "discard";
@@ -53,11 +60,31 @@ export interface ShiftOp {
 }
 export interface PlayOp {
   kind: "play";
-  /** Whose hand the card comes from, and onto whose side it lands. */
+  /** Who plays, and onto whose side the card lands. */
   playerIdx: PlayerIdx;
-  instanceId: string;
+  /**
+   * Required when the card comes from playerIdx's hand. Omit when
+   * fromDeck=true — the engine pops the top of the player's deck.
+   */
+  instanceId?: string;
   lineIdx: LineIdx;
   faceDown: boolean;
+  /**
+   * When true, source the card from the top of playerIdx's deck instead
+   * of their hand. Used by effects like "Play the top card of your deck
+   * face-down" (Life 0, Gravity 0/6, Water 1). Does NOT fire after-draw
+   * triggers — the card never enters hand.
+   */
+  fromDeck?: boolean;
+  /**
+   * Insert beneath this anchor instance (Gravity 0 "play face-down under
+   * this card"). The anchor must be in the destination line on the same
+   * side. The inserted card lands covered, so its middle text does NOT
+   * resolve and no "covered" replacement triggers fire — the anchor was
+   * already uncovered and stays uncovered. Falls back to a top-of-stack
+   * play if the anchor isn't present in that line.
+   */
+  underInstanceId?: string;
 }
 export interface ReturnOp {
   kind: "return";

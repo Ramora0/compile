@@ -74,7 +74,9 @@ const hate4: CardDef = {
     resolve: function* (ctx) {
       const line = h.lineOfThis(ctx);
       if (line === null) return;
-      const target = h.lowestCoveredOfLine(ctx.state(), ctx.self, line);
+      // "Lowest value covered card in this line" — both sides; "this line"
+      // spans the active player and opponent stacks alike.
+      const target = h.lowestCoveredInLine(ctx.state(), line);
       if (target) yield* ctx.delete(target.instanceId);
     },
   },

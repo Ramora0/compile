@@ -34,7 +34,6 @@ const death1: CardDef = {
     kind: "trigger-phase",
     phase: "start",
     resolve: function* (ctx) {
-      if (ctx.myHand().length < 0) return;
       const choice = yield* ctx.promptOption({
         options: [
           { id: "yes", label: "Draw 1" },
@@ -43,7 +42,11 @@ const death1: CardDef = {
         reason: "death1-may-draw",
       });
       if (choice !== "yes") return;
-      yield* ctx.draw(1);
+      // "You may draw 1 card. If you do, delete 1 other card, then delete
+      // this card." The "if you do" clause only fires when a draw actually
+      // happened — i.e. the deck (after trash reshuffle) had a card to give.
+      const drawn = yield* ctx.draw(1);
+      if (drawn.length === 0) return;
       yield* h.deleteChosen(ctx, { excludeInstanceId: ctx.thisInstanceId });
       yield* ctx.delete(ctx.thisInstanceId);
     },
@@ -61,9 +64,12 @@ const death2: CardDef = {
       allowedLines: [0, 1, 2],
       reason: "death2-delete-line",
     });
+    // "Values of 1 or 2" — effective value, so face-down cards (default 2)
+    // are eligible. Darkness 2 in the line lifts face-downs to 4 and makes
+    // them ineligible, which is exactly the intended interaction.
     yield* h.deleteAllMatching(ctx, {
       inLines: [chosenLine],
-      printedValueIn: [1, 2],
+      valueIn: [1, 2],
     });
   },
   bottom: null,
@@ -84,7 +90,10 @@ const death4: CardDef = {
   value: 4,
   top: null,
   middle: function* (ctx) {
-    yield* h.deleteChosen(ctx, { printedValueIn: [0, 1] });
+    // "A card with a value of 0 or 1" — effective value. No face-down value
+    // defaults to 0 or 1 today, but reading it as effective keeps the door
+    // open to future overrides without changing this card.
+    yield* h.deleteChosen(ctx, { valueIn: [0, 1] });
   },
   bottom: null,
 };

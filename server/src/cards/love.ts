@@ -18,21 +18,7 @@ const love1: CardDef = {
   value: 1,
   top: null,
   middle: function* (ctx) {
-    // "Draw the top card of your opponent's deck."
-    // No engine Op exists for transferring directly from an opponent's deck to
-    // self's hand, so mutate state directly. Reshuffle opp's trash into deck
-    // if their deck is empty (mirrors the runtime's own draw behavior).
-    const state = ctx.state();
-    const opp = state.players[ctx.opp];
-    if (opp.deck.length === 0 && opp.trash.length > 0) {
-      opp.deck = opp.trash.splice(0);
-    }
-    const card = opp.deck.pop();
-    if (card) {
-      // Ownership transfers per rules.md:106 (give/take retains ownership).
-      card.ownerIdx = ctx.self;
-      state.players[ctx.self].hand.push(card);
-    }
+    yield* ctx.draw(1, ctx.self, "opp");
   },
   bottom: {
     kind: "trigger-phase",
@@ -61,7 +47,9 @@ const love3: CardDef = {
   top: null,
   middle: function* (ctx) {
     h.takeRandomFromOpp(ctx.state(), ctx.self);
-    yield* h.mayGiveOneToOpp(ctx, "love-3-give");
+    // Mandatory give — Love 3's text has no "you may" on the give. Love 1's
+    // bottom is the optional variant.
+    yield* h.giveOneToOpp(ctx, "love-3-give");
   },
   bottom: null,
 };

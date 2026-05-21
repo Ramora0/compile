@@ -60,9 +60,11 @@ export function* compileEffect(
       protocol: slot.protocol,
     });
   } else {
-    // Recompile: draw top of opponent's deck into the active player's hand.
-    yield { kind: "draw", playerIdx, count: 0 }; // placeholder no-op for sequencing
-    drawFromOpponentDeck(state, playerIdx);
+    // Recompile (rules.md:55): draw the top of opponent's deck into the
+    // active player's hand. Routed through the Op pump so after-draw
+    // reactives (e.g. Spirit 3) fire and the trash-reshuffle uses the
+    // seeded RNG.
+    yield { kind: "draw", playerIdx, count: 1, from: "opp" };
     state.log.push({
       t: Date.now(),
       type: "protocol-recompiled",
@@ -90,29 +92,15 @@ export function* compileEffect(
   };
 }
 
-/** Helper: pull the top card of opponent's deck into active player's hand. Reshuffles trash if empty. */
-function drawFromOpponentDeck(state: GameState, playerIdx: PlayerIdx): void {
-  const opp = (1 - playerIdx) as PlayerIdx;
-  const oppPlayer = state.players[opp];
-  if (oppPlayer.deck.length === 0) {
-    // Reshuffle opp's trash into deck (rules.md:49 applies to all draw actions).
-    if (oppPlayer.trash.length === 0) return;
-    // Defer to runtime's RNG via a synchronous shuffle.
-    // (This intentionally bypasses the seeded shuffle because compile drawing
-    // mid-effect doesn't go through opDraw. For determinism in tests that
-    // care, the trash is non-empty before recompile.)
-    const stash = oppPlayer.trash.splice(0);
-    oppPlayer.deck = stash;
-  }
-  const card = oppPlayer.deck.pop();
-  if (!card) return;
-  state.players[playerIdx].hand.push(card);
-}
-
 /**
  * Convenience launcher: push the compile generator onto the runtime's stack
  * and pump it. Returns once compile is fully resolved (or a prompt suspends
  * mid-compile, e.g. a deleted-by-compile replacement triggered a prompt).
+ *
+ * The wrapper advances phase to check-cache *after* the compile drains —
+ * including any interrupts that suspended on prompts. Compile is the active
+ * player's whole action on its turn (rules.md:40); once it's resolved, the
+ * turn proceeds to check-cache regardless of how many interrupts fired.
  */
 export function performCompile(
   runtime: EffectRuntime,
@@ -120,10 +108,11 @@ export function performCompile(
   playerIdx: PlayerIdx,
   lineIdx: LineIdx,
 ): void {
-  // Wrap the typed-return generator into a void-return one so it slots into
-  // the runtime stack (which doesn't track per-frame return values).
   function* wrapper(): Generator<Op, void, OpResult> {
     yield* compileEffect(state, playerIdx, lineIdx);
+    if (state.winnerIdx === null) {
+      state.phase = "check-cache";
+    }
   }
   runtime.push(`compile:${playerIdx}:${lineIdx}`, wrapper());
   runtime.pump();

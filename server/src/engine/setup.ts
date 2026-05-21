@@ -160,6 +160,7 @@ export function createGame(opts: NewGameOptions): GameState {
     log: [{ t: 0, type: "game-created", gameId: opts.gameId }],
     winnerIdx: null,
     compiledThisTurn: false,
+    compileBans: [0, 0],
   };
 }
 

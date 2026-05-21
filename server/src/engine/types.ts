@@ -80,7 +80,14 @@ export type RuleOverride =
   | {
       kind: "ignore-middle";
       lineIdx: LineIdx;
-      side: Side;
+      /**
+       * "self" — suppresses middles on the override-owner's side only.
+       * "opp"  — suppresses middles on the opponent's side only.
+       * "any"  — suppresses middles on both sides ("cards in this line"),
+       *          used by Apathy 2 ("Ignore all middle commands of cards in
+       *          this line").
+       */
+      side: Side | "any";
       ownerIdx: PlayerIdx;
     }
   | {
@@ -140,6 +147,14 @@ export interface GameState {
   winnerIdx: PlayerIdx | null;
   /** Compile already performed this turn — only one allowed per turn. */
   compiledThisTurn: boolean;
+  /**
+   * Pending compile bans. `compileBans[p]` is the number of upcoming
+   * Check-Compile phases on player p's turn to skip. Metal 1 increments
+   * `compileBans[opp]` so the opponent cannot compile on their next turn;
+   * the count is decremented (and the phase skipped) when that player's
+   * Check-Compile phase fires.
+   */
+  compileBans: [number, number];
 }
 
 export interface GameEvent {

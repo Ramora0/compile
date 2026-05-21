@@ -174,23 +174,33 @@ export class EffectRuntime {
   }
 
   private opDraw(op: DrawOp): OpResult {
-    const player = this.state.players[op.playerIdx];
+    const receiver = this.state.players[op.playerIdx];
+    const fromOpp = op.from === "opp";
+    const source = fromOpp
+      ? this.state.players[(1 - op.playerIdx) as PlayerIdx]
+      : receiver;
     const drawn: CardInstance[] = [];
     for (let i = 0; i < op.count; i++) {
-      if (player.deck.length === 0) {
-        // Reshuffle trash into deck (rules.md:49).
-        if (player.trash.length === 0) break;
-        const reshuffled = shuffle(player.trash, this.state.rngSeed, this.state.rngCursor);
+      if (source.deck.length === 0) {
+        // Reshuffle the source's trash into its deck (rules.md:49).
+        if (source.trash.length === 0) break;
+        const reshuffled = shuffle(source.trash, this.state.rngSeed, this.state.rngCursor);
         this.state.rngCursor = reshuffled.cursor;
-        player.deck = reshuffled.result;
-        player.trash = [];
+        source.deck = reshuffled.result;
+        source.trash = [];
       }
-      const card = player.deck.pop();
+      const card = source.deck.pop();
       if (!card) break;
-      player.hand.push(card);
+      if (fromOpp) card.ownerIdx = op.playerIdx;
+      receiver.hand.push(card);
       drawn.push(card);
     }
-    this.log({ type: "draw", playerIdx: op.playerIdx, count: drawn.length });
+    this.log({
+      type: "draw",
+      playerIdx: op.playerIdx,
+      count: drawn.length,
+      ...(fromOpp ? { from: "opp" as const } : {}),
+    });
     if (drawn.length > 0) this.fireReactive("after-draw", op.playerIdx);
     return { drawn };
   }
@@ -300,11 +310,54 @@ export class EffectRuntime {
 
   private opPlay(op: PlayOp): OpResult {
     const player = this.state.players[op.playerIdx];
-    const idx = player.hand.findIndex((c) => c.instanceId === op.instanceId);
-    if (idx < 0) return { played: null };
-    const [card] = player.hand.splice(idx, 1);
+    let card: CardInstance | undefined;
+    if (op.fromDeck) {
+      if (player.deck.length === 0) {
+        // Reshuffle the player's trash into their deck (rules.md:49 applies
+        // to deck-sourced plays the same way it does to draws).
+        if (player.trash.length === 0) return { played: null };
+        const reshuffled = shuffle(player.trash, this.state.rngSeed, this.state.rngCursor);
+        this.state.rngCursor = reshuffled.cursor;
+        player.deck = reshuffled.result;
+        player.trash = [];
+      }
+      card = player.deck.pop();
+    } else {
+      if (op.instanceId === undefined) return { played: null };
+      const idx = player.hand.findIndex((c) => c.instanceId === op.instanceId);
+      if (idx < 0) return { played: null };
+      [card] = player.hand.splice(idx, 1);
+    }
     if (!card) return { played: null };
     card.faceDown = op.faceDown;
+
+    // Mid-stack insertion ("play under this card", Gravity 0). The anchor must
+    // live in the destination line on the same side; otherwise we fall back to
+    // a normal top-of-stack play. The inserted card lands covered so no
+    // "covered" replacement triggers fire (its neighbours above were already
+    // covered) and middle text does not resolve.
+    if (op.underInstanceId !== undefined) {
+      const anchor = findCardOnField(this.state, op.underInstanceId);
+      const sameLane =
+        anchor && anchor.playerIdx === op.playerIdx && anchor.lineIdx === op.lineIdx;
+      if (sameLane) {
+        this.state.stacks[op.playerIdx][op.lineIdx].cards.splice(anchor.stackIdx, 0, card);
+        this.log({
+          type: "play",
+          playerIdx: op.playerIdx,
+          instanceId: card.instanceId,
+          cardId: card.cardId,
+          lineIdx: op.lineIdx,
+          faceDown: op.faceDown,
+          under: op.underInstanceId,
+        });
+        recomputeOverrides(this.state);
+        this.fireReactive("after-play", op.playerIdx);
+        return { played: card };
+      }
+      // Anchor missing — fall through to top-of-stack play.
+    }
+
     // Fire 'covered' on the soon-to-be-covered card BEFORE the push so its
     // bottom replacement trigger is still considered visible (uncovered).
     const previouslyUncovered =

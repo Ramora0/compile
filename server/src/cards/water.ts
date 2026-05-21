@@ -54,7 +54,10 @@ const water3: CardDef = {
   top: null,
   middle: function* (ctx) {
     const line = yield* ctx.promptLine({ allowedLines: [0, 1, 2], reason: "water-3-line" });
-    yield* h.returnAllMatching(ctx, { inLines: [line], printedValueIn: [2] });
+    // "All cards with a value of 2" — effective value. Face-down cards
+    // default to 2 (so they're returned), unless Darkness 2 raises them to 4
+    // in this line (then they're not).
+    yield* h.returnAllMatching(ctx, { inLines: [line], valueIn: [2] });
   },
   bottom: null,
 };

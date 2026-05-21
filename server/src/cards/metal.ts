@@ -44,7 +44,9 @@ const metal1: CardDef = {
   top: null,
   middle: function* (ctx) {
     yield* ctx.draw(2);
-    // note: "opponent cannot compile next turn" not yet wired into the engine; draws still resolve.
+    // "Your opponent cannot compile next turn." The check-compile phase
+    // consumes one ban-turn from compileBans[active] when it fires next.
+    ctx.state().compileBans[ctx.opp]++;
   },
   bottom: null,
 };
