@@ -19,6 +19,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { newGame, placeCard } from "./helpers/harness.js";
 import { Game } from "../src/engine/game.js";
+import {
+  commitDiscard,
+  commitOption,
+  commitPlay,
+} from "./helpers/answers.js";
 import { step } from "../src/engine/phases/index.js";
 import { lineValue } from "../src/engine/field.js";
 import { ignoreMiddleFor, recomputeOverrides } from "../src/engine/reactive/index.js";
@@ -222,18 +227,20 @@ describe("Fire 1, Fire 2 — mandatory discard then delete/return", () => {
     // optional "yes/no" choose-option prompt that mayDiscardSelfN used).
     expect(g.pendingPrompt?.kind).toBe("discard-selection");
     const discardId = g.players[0].hand[0]!.instanceId;
-    game.resolvePrompt({
+    game.runtime.resolvePrompt({
       kind: "discard-chosen",
       promptId: g.pendingPrompt!.promptId,
       instanceIds: [discardId],
     });
+    game.runtime.pump();
     // Then a choose-card for the delete (no skip step).
     expect(g.pendingPrompt?.kind).toBe("choose-card");
-    game.resolvePrompt({
+    game.runtime.resolvePrompt({
       kind: "card-chosen",
       promptId: g.pendingPrompt!.promptId,
       instanceId: target.instanceId,
     });
+    game.runtime.pump();
     expect(g.players[0].hand.length).toBe(handBefore - 1);
     expect(g.players[0].trash.some((c) => c.instanceId === discardId)).toBe(true);
     expect(g.stacks[1][0].cards.find((c) => c.instanceId === target.instanceId)).toBeUndefined();
@@ -260,17 +267,19 @@ describe("Fire 1, Fire 2 — mandatory discard then delete/return", () => {
     game.runtime.push("test", flipGen(inst.instanceId));
     game.runtime.pump();
     expect(g.pendingPrompt?.kind).toBe("discard-selection");
-    game.resolvePrompt({
+    game.runtime.resolvePrompt({
       kind: "discard-chosen",
       promptId: g.pendingPrompt!.promptId,
       instanceIds: [g.players[0].hand[0]!.instanceId],
     });
+    game.runtime.pump();
     expect(g.pendingPrompt?.kind).toBe("choose-card");
-    game.resolvePrompt({
+    game.runtime.resolvePrompt({
       kind: "card-chosen",
       promptId: g.pendingPrompt!.promptId,
       instanceId: target.instanceId,
     });
+    game.runtime.pump();
     // Target ends up back in its owner's (p1's) hand.
     expect(g.stacks[1][0].cards.length).toBe(0);
     expect(g.players[1].hand.find((c) => c.instanceId === target.instanceId)).toBeDefined();
@@ -298,11 +307,12 @@ describe("Love 3 — mandatory give", () => {
       expect(g.pendingPrompt.optional).toBe(false);
     }
     const giveId = g.players[0].hand[0]!.instanceId;
-    game.resolvePrompt({
+    game.runtime.resolvePrompt({
       kind: "card-chosen",
       promptId: g.pendingPrompt!.promptId,
       instanceId: giveId,
     });
+    game.runtime.pump();
     // After the give, hand counts swap one card.
     expect(g.players[0].hand.length).toBe(myHandBefore);
     expect(g.players[1].hand.length).toBe(oppHandBefore);
@@ -371,11 +381,12 @@ describe("Death 2 / Water 3 — effective-value targeting", () => {
     game.runtime.pump();
     // The middle prompts for a line.
     expect(g.pendingPrompt?.kind).toBe("choose-line");
-    game.resolvePrompt({
+    game.runtime.resolvePrompt({
       kind: "line-chosen",
       promptId: g.pendingPrompt!.promptId,
       lineIdx: 1,
     });
+    game.runtime.pump();
     // Face-down card with effective value 2 should be deleted; value-3 face-up survives.
     expect(g.stacks[1][1].cards.find((c) => c.instanceId === fd.instanceId)).toBeUndefined();
     expect(g.stacks[1][1].cards.length).toBe(1);
@@ -390,11 +401,12 @@ describe("Death 2 / Water 3 — effective-value targeting", () => {
     game.runtime.push("test", flipGen(inst.instanceId));
     game.runtime.pump();
     expect(g.pendingPrompt?.kind).toBe("choose-line");
-    game.resolvePrompt({
+    game.runtime.resolvePrompt({
       kind: "line-chosen",
       promptId: g.pendingPrompt!.promptId,
       lineIdx: 1,
     });
+    game.runtime.pump();
     // The face-down card (effective value 2) goes back to its owner's hand.
     expect(g.players[0].hand.some((c) => c.instanceId === fdCard.instanceId)).toBe(true);
     // The face-up value-3 card stays put.
@@ -525,20 +537,22 @@ describe("Light 0 — value snapshot survives flip-time deletion", () => {
     game.runtime.pump();
     // light-0's middle prompts for the flip target.
     expect(g.pendingPrompt?.kind).toBe("choose-card");
-    game.resolvePrompt({
+    game.runtime.resolvePrompt({
       kind: "card-chosen",
       promptId: g.pendingPrompt!.promptId,
       instanceId: target.instanceId,
     });
+    game.runtime.pump();
     // After the flip cascade (death-5's middle issues a discard prompt),
     // resolve any pending prompt then check the draw happened.
     if (g.pendingPrompt?.kind === "discard-selection") {
       const handId = g.players[1].hand[0]!.instanceId;
-      game.resolvePrompt({
+      game.runtime.resolvePrompt({
         kind: "discard-chosen",
         promptId: g.pendingPrompt.promptId,
         instanceIds: [handId],
       });
+      game.runtime.pump();
     }
     // We drew 5 cards from the post-flip value of death-5.
     expect(g.players[0].hand.length).toBe(handBefore + 5);
@@ -620,22 +634,18 @@ describe("Mid-action prompt advances the turn (regression)", () => {
     g.players[1].hand.push(death5);
 
     const game = new Game(g);
-    const midAction = game.submitAction(1, {
-      kind: "play",
+    const midAction = commitPlay(game, 1, {
       instanceId: death5.instanceId,
       lineIdx: deathLine,
       faceDown: false,
     });
-    expect(midAction.kind).toBe("awaiting-prompt");
-    expect(g.pendingPrompt?.kind).toBe("discard-selection");
+    expect(midAction.kind).toBe("awaiting-answer");
+    expect(g.pendingQuestion?.kind).toBe("discard-selection");
 
-    const after = game.resolvePrompt({
-      kind: "discard-chosen",
-      promptId: g.pendingPrompt!.promptId,
-      instanceIds: [g.players[1].hand[0]!.instanceId],
-    });
+    const after = commitDiscard(game, 1, [g.players[1].hand[0]!.instanceId]);
     expect(g.activePlayerIdx).toBe(0);
-    expect(after.kind).toBe("awaiting-action");
+    expect(after.kind).toBe("awaiting-answer");
+    expect(g.pendingQuestion?.kind).toBe("action");
   });
 
   it("Fire 4: turn ends after the discard-count prompt and its discards resolve", () => {
@@ -653,37 +663,28 @@ describe("Mid-action prompt advances the turn (regression)", () => {
     g.players[0].hand.push(fire4);
 
     const game = new Game(g);
-    game.submitAction(0, {
-      kind: "play",
+    commitPlay(game, 0, {
       instanceId: fire4.instanceId,
       lineIdx: fireLine,
       faceDown: false,
     });
     // First prompt: how many to discard.
-    expect(g.pendingPrompt?.kind).toBe("choose-option");
-    game.resolvePrompt({
-      kind: "option-chosen",
-      promptId: g.pendingPrompt!.promptId,
-      optionId: "1",
-    });
+    expect(g.pendingQuestion?.kind).toBe("choose-option");
+    commitOption(game, 0, "1");
     // Second prompt: which card to discard.
-    expect(g.pendingPrompt?.kind).toBe("discard-selection");
-    const after = game.resolvePrompt({
-      kind: "discard-chosen",
-      promptId: g.pendingPrompt!.promptId,
-      instanceIds: [g.players[0].hand[0]!.instanceId],
-    });
+    expect(g.pendingQuestion?.kind).toBe("discard-selection");
+    const after = commitDiscard(game, 0, [g.players[0].hand[0]!.instanceId]);
     // p1's turn now — check-cache may issue a clear-cache prompt if hand > 5
     // after the draw, but in either case it is no longer p0's action phase.
-    if (after.kind === "awaiting-prompt") {
-      expect(g.pendingPrompt?.kind).toBe("discard-selection");
-      expect(g.pendingPrompt?.forPlayerIdx).toBe(0);
+    expect(after.kind).toBe("awaiting-answer");
+    if (g.pendingQuestion?.kind === "discard-selection") {
+      expect(g.pendingQuestion.forPlayerIdx).toBe(0);
       // The clear-cache prompt belongs to p0 but only because cache check runs
       // before the turn handoff. The phase is past action regardless.
       expect(g.phase).toBe("check-cache");
     } else {
-      expect(g.activePlayerIdx).toBe(0 + 1);
-      expect(after.kind).toBe("awaiting-action");
+      expect(g.activePlayerIdx).toBe(1);
+      expect(g.pendingQuestion?.kind).toBe("action");
     }
   });
 });

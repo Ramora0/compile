@@ -2,11 +2,9 @@ import { useContext, useEffect, useMemo, useState, type CSSProperties } from "re
 import type {
   LineIdx,
   LogEntry,
-  OpponentPromptSummary,
-  PlayerAction,
+  OpponentQuestionSummary,
   PlayerIdx,
-  Prompt,
-  PromptResponse,
+  Question,
   RedactedCard,
   RedactedPlayer,
   RedactedState,
@@ -15,6 +13,20 @@ import type { NotifyFn } from "./App.js";
 import { getCard } from "./cards.js";
 import { promptTargets, type PromptTargets } from "./prompts.js";
 import { send, type ClientSocket } from "./socket.js";
+import {
+  answerForAck,
+  answerForChooseCard,
+  answerForChooseLine,
+  answerForChooseOption,
+  answerForCompile,
+  answerForDiscard,
+  answerForPlay,
+  answerForPlayFromHand,
+  answerForRearrange,
+  answerForRefresh,
+  compileLinesFromQuestion,
+  playTargetsFromQuestion,
+} from "./answers.js";
 import { Stage } from "./ui/Stage.js";
 import { Card } from "./ui/Card.js";
 import { Sigil } from "./ui/Sigil.js";
@@ -187,14 +199,14 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
     setDragInstanceId(null);
   }, [state.turnNumber, state.activePlayerIdx]);
 
-  // Clear all pending picks when prompt changes (id null or different promptId).
-  const promptId = state.pendingPrompt?.promptId ?? null;
+  // Clear all pending picks when the outstanding question changes.
+  const questionId = state.pendingQuestion?.questionId ?? null;
   useEffect(() => {
     setPickedDiscards([]);
     setPendingCard(null);
     setPendingLine(null);
     setPendingOption(null);
-  }, [promptId]);
+  }, [questionId]);
 
   const youPlayer = state.players[youIdx];
   const oppPlayer = state.players[oppIdx];
@@ -218,33 +230,44 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
     });
   }, [youHand, youProtocolOrder]);
 
+  // canAct: it's the right phase AND the active question is the unrestricted
+  // "pick an action" question (action / play / refresh).
   const canAct =
-    state.phase === "action" &&
-    state.pendingPrompt === null &&
-    state.winnerIdx === null &&
-    isMyTurn;
+    isMyTurn &&
+    state.gameOver === null &&
+    state.pendingQuestion?.kind === "action" &&
+    state.pendingQuestion?.forPlayerIdx === myIdx;
 
   const compilable: LineIdx[] = useMemo(() => {
     if (!isMyTurn) return [];
-    return state.compilableLines as LineIdx[];
-  }, [state.compilableLines, isMyTurn]);
+    if (state.pendingQuestion?.kind !== "compile-line") return [];
+    if (state.pendingQuestion.forPlayerIdx !== myIdx) return [];
+    return compileLinesFromQuestion(state.pendingQuestion);
+  }, [state.pendingQuestion, isMyTurn, myIdx]);
+
+  const rearrangeQuestion =
+    state.pendingQuestion &&
+    state.pendingQuestion.kind === "control-rearrange" &&
+    state.pendingQuestion.forPlayerIdx === myIdx
+      ? state.pendingQuestion
+      : null;
 
   const draggedCard = dragInstanceId
     ? youHand.find((c) => c.instanceId === dragInstanceId) ?? null
     : null;
   const draggedProtocol = draggedCard ? getCard(draggedCard.cardId)?.protocol ?? null : null;
 
-  // ── prompt-driven selection ──────────────────────────────────
-  // Only surface prompt targets when the prompt is for me; otherwise the
-  // opponent's prompt would highlight cards on my screen with no way to act.
+  // ── question-driven selection ──────────────────────────────────
+  // Only surface targets when the question is for me; otherwise the
+  // opponent's question would highlight cards on my screen with no way to act.
   const pendingPrompt =
-    state.pendingPrompt && state.pendingPrompt.forPlayerIdx === myIdx
-      ? state.pendingPrompt
+    state.pendingQuestion && state.pendingQuestion.forPlayerIdx === myIdx
+      ? state.pendingQuestion
       : null;
 
-  // A `play-from-hand` prompt borrows the normal play UI (drag-drop with
-  // face-up/face-down lane drop zones) but routes the play through
-  // prompt_response and obeys the prompt's allowedLines + orientation.
+  // A `play-from-hand` question borrows the normal play UI (drag-drop with
+  // face-up/face-down lane drop zones); the question's options enumerate
+  // every legal (card × line × orientation) tuple.
   const playPrompt =
     pendingPrompt && pendingPrompt.kind === "play-from-hand" ? pendingPrompt : null;
 
@@ -252,64 +275,61 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
     pendingPrompt && pendingPrompt.kind === "show-hand" ? pendingPrompt : null;
 
   const playContext: PlayContext | null = useMemo(() => {
-    if (canAct) {
+    if (canAct && pendingPrompt) {
       return {
         mode: "action",
         allowedLines: new Set<LineIdx>([0, 1, 2]),
         orientation: "any",
         dispatch: (instanceId, lineIdx, faceDown) => {
-          const action: PlayerAction = { kind: "play", instanceId, lineIdx, faceDown };
-          try {
-            send.submitAction(client, gameId, action);
-          } catch (e) {
-            onNotify((e as Error).message, "error");
+          const ans = answerForPlay(pendingPrompt, { instanceId, lineIdx, faceDown });
+          if (!ans) {
+            onNotify("illegal play", "error");
+            return;
           }
+          send.answer(client, gameId, ans);
         },
       };
     }
     if (playPrompt) {
+      // Derive allowed orientations from the question's enumerated options.
+      let hasUp = false;
+      let hasDown = false;
+      const lines = new Set<LineIdx>();
+      for (const opt of playPrompt.options) {
+        const p = opt.payload as { instanceId: string; lineIdx: LineIdx; faceDown: boolean };
+        lines.add(p.lineIdx);
+        if (p.faceDown) hasDown = true;
+        else hasUp = true;
+      }
+      const orientation: "any" | "face-up" | "face-down" =
+        hasUp && hasDown ? "any" : hasDown ? "face-down" : "face-up";
       return {
         mode: "prompt",
-        allowedLines: new Set<LineIdx>(playPrompt.allowedLines),
-        orientation: playPrompt.orientation,
+        allowedLines: lines,
+        orientation,
         dispatch: (instanceId, lineIdx, faceDown) => {
-          try {
-            send.promptResponse(client, gameId, {
-              kind: "play-from-hand-chosen",
-              promptId: playPrompt.promptId,
-              instanceId,
-              lineIdx,
-              faceDown,
-            });
-          } catch (e) {
-            onNotify((e as Error).message, "error");
+          const ans = answerForPlayFromHand(playPrompt, { instanceId, lineIdx, faceDown });
+          if (!ans) {
+            onNotify("illegal play-from-hand", "error");
+            return;
           }
+          send.answer(client, gameId, ans);
         },
       };
     }
     return null;
-  }, [canAct, playPrompt, client, gameId, onNotify]);
+  }, [canAct, pendingPrompt, playPrompt, client, gameId, onNotify]);
 
   const refresh = () => {
-    if (!canAct) return;
-    try {
-      send.submitAction(client, gameId, { kind: "refresh" });
-    } catch (e) {
-      onNotify((e as Error).message, "error");
-    }
+    if (!canAct || !pendingPrompt) return;
+    const ans = answerForRefresh(pendingPrompt);
+    if (!ans) return;
+    send.answer(client, gameId, ans);
   };
   const targets = useMemo<PromptTargets>(
     () => promptTargets(pendingPrompt, state),
     [pendingPrompt, state],
   );
-  const sendPromptResponse = (response: PromptResponse) => {
-    if (!pendingPrompt) return;
-    try {
-      send.promptResponse(client, gameId, response);
-    } catch (e) {
-      onNotify((e as Error).message, "error");
-    }
-  };
 
   const handleCardPick = (instanceId: string) => {
     if (!pendingPrompt) return;
@@ -317,9 +337,10 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
     if (pendingPrompt.kind === "choose-card") {
       setPendingCard((cur) => (cur === instanceId ? null : instanceId));
     } else if (pendingPrompt.kind === "discard-selection") {
+      const max = pendingPrompt.picks?.max ?? 1;
       setPickedDiscards((cur) => {
         if (cur.includes(instanceId)) return cur.filter((x) => x !== instanceId);
-        if (cur.length >= pendingPrompt.count) {
+        if (cur.length >= max) {
           return [...cur.slice(1), instanceId];
         }
         return [...cur, instanceId];
@@ -340,49 +361,34 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
 
   const confirmPick = () => {
     if (!pendingPrompt) return;
+    let ans = null;
     if (pendingPrompt.kind === "choose-card") {
       if (!pendingCard) return;
-      sendPromptResponse({
-        kind: "card-chosen",
-        promptId: pendingPrompt.promptId,
-        instanceId: pendingCard,
-      });
+      ans = answerForChooseCard(pendingPrompt, pendingCard);
     } else if (pendingPrompt.kind === "choose-line") {
       if (pendingLine === null) return;
-      sendPromptResponse({
-        kind: "line-chosen",
-        promptId: pendingPrompt.promptId,
-        lineIdx: pendingLine,
-      });
+      ans = answerForChooseLine(pendingPrompt, pendingLine);
     } else if (pendingPrompt.kind === "choose-option") {
       if (!pendingOption) return;
-      sendPromptResponse({
-        kind: "option-chosen",
-        promptId: pendingPrompt.promptId,
-        optionId: pendingOption,
-      });
+      ans = answerForChooseOption(pendingPrompt, pendingOption);
     } else if (pendingPrompt.kind === "discard-selection") {
-      if (pickedDiscards.length !== pendingPrompt.count) return;
-      sendPromptResponse({
-        kind: "discard-chosen",
-        promptId: pendingPrompt.promptId,
-        instanceIds: pickedDiscards,
-      });
+      const need = pendingPrompt.picks?.min ?? pickedDiscards.length;
+      if (pickedDiscards.length !== need) return;
+      ans = answerForDiscard(pendingPrompt, pickedDiscards);
     }
+    if (ans) send.answer(client, gameId, ans);
   };
 
   const skipPrompt = () => {
     if (!pendingPrompt || pendingPrompt.kind !== "choose-card" || !pendingPrompt.optional) return;
-    sendPromptResponse({
-      kind: "card-chosen",
-      promptId: pendingPrompt.promptId,
-      instanceId: null,
-    });
+    const ans = answerForChooseCard(pendingPrompt, null);
+    if (ans) send.answer(client, gameId, ans);
   };
 
   const ackShowHand = () => {
     if (!showHandPrompt) return;
-    sendPromptResponse({ kind: "ack", promptId: showHandPrompt.promptId });
+    const ans = answerForAck(showHandPrompt);
+    if (ans) send.answer(client, gameId, ans);
   };
 
   const pickedSet = useMemo(() => {
@@ -443,20 +449,29 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
         <LogOverlay log={state.log} onClose={() => setLogExpanded(false)} />
       )}
 
-      {state.phase === "check-compile" &&
-        state.winnerIdx === null &&
-        isMyTurn &&
-        compilable.length > 0 && (
+      {compilable.length > 0 &&
+        state.pendingQuestion?.kind === "compile-line" &&
+        state.pendingQuestion.forPlayerIdx === myIdx && (
           <CompilePickerOverlay
             state={state}
             client={client}
             gameId={gameId}
             onNotify={onNotify}
+            question={state.pendingQuestion}
             lines={compilable}
           />
         )}
 
-      {pendingPrompt && !showHandPrompt && (
+      {rearrangeQuestion && (
+        <RearrangeOverlay
+          client={client}
+          gameId={gameId}
+          question={rearrangeQuestion}
+          onNotify={onNotify}
+        />
+      )}
+
+      {pendingPrompt && !showHandPrompt && pendingPromptIsBanner(pendingPrompt) && (
         <PromptBanner
           prompt={pendingPrompt}
           targets={targets}
@@ -470,19 +485,19 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
         />
       )}
 
-      {state.winnerIdx === null &&
+      {state.gameOver === null &&
         !pendingPrompt &&
-        (state.opponentPromptSummary !== null || !isMyTurn) && (
+        (state.opponentQuestion !== null || !isMyTurn) && (
           <WaitingOverlay
             oppIdx={oppIdx}
-            summary={state.opponentPromptSummary}
+            summary={state.opponentQuestion}
             phase={state.phase}
           />
         )}
 
-      {state.winnerIdx !== null && (
+      {state.gameOver !== null && (
         <GameOverOverlay
-          winnerIdx={state.winnerIdx}
+          winnerIdx={state.gameOver.winnerIdx}
           players={state.players}
         />
       )}
@@ -536,7 +551,7 @@ function reasonVerb(reason: string): string | null {
  * a phase-based label when there is no active prompt for them.
  */
 function describeOpponentActivity(
-  summary: OpponentPromptSummary | null,
+  summary: OpponentQuestionSummary | null,
   phase: RedactedState["phase"],
 ): string {
   if (summary) {
@@ -580,7 +595,7 @@ function WaitingOverlay({
   phase,
 }: {
   oppIdx: PlayerIdx;
-  summary: OpponentPromptSummary | null;
+  summary: OpponentQuestionSummary | null;
   phase: RedactedState["phase"];
 }) {
   const label = describeOpponentActivity(summary, phase);
@@ -752,7 +767,9 @@ function Lane({
   // Server-authoritative drop legality: validatePlayCard already encodes
   // protocol-match, play-anywhere overrides (Spirit 1 top), and play-restriction
   // overrides (Apathy etc.). The client just reads the precomputed answer.
-  const dragOptions = dragInstanceId ? state.playOptions[dragInstanceId] : undefined;
+  const dragOptions = dragInstanceId
+    ? playTargetsFromQuestion(state.pendingQuestion, dragInstanceId)
+    : undefined;
   const faceUpLegal = showFaceUpZone && (dragOptions?.faceUpLines.includes(lineIdx) ?? false);
   const faceDownLegal =
     showFaceDownZone && (dragOptions?.faceDownLines.includes(lineIdx) ?? false);
@@ -1647,28 +1664,32 @@ function RightRail({
   const youHandLen = Array.isArray(youPlayer.hand) ? youPlayer.hand.length : 0;
 
   const isMyTurn = state.activePlayerIdx === youIdx;
-  const gameOver = state.winnerIdx !== null;
+  const gameOver = state.gameOver !== null;
   const youActive = !gameOver && isMyTurn;
   const oppActive = !gameOver && !isMyTurn;
 
   const youLabel = "YOU";
   const oppLabel = `OPPONENT`;
 
-  // When the opponent has a pending prompt (or it's just their turn), the
+  // When the opponent has a pending question (or it's just their turn), the
   // status row should describe what we're waiting on, not just "OPP'S TURN".
-  const waitingOnOpp = !gameOver && (state.opponentPromptSummary !== null || !isMyTurn);
+  const waitingOnOpp = !gameOver && (state.opponentQuestion !== null || !isMyTurn);
   const statusTone: "you" | "opp" | "neutral" = gameOver
     ? "neutral"
     : waitingOnOpp
       ? "opp"
       : "you";
-  const oppActivity = describeOpponentActivity(state.opponentPromptSummary, state.phase);
+  const oppActivity = describeOpponentActivity(state.opponentQuestion, state.phase);
+  const myQuestion =
+    state.pendingQuestion && state.pendingQuestion.forPlayerIdx === youIdx
+      ? state.pendingQuestion
+      : null;
   const statusLabel = gameOver
     ? "GAME OVER"
     : canAct
       ? "YOUR TURN"
       : !waitingOnOpp
-        ? state.pendingPrompt
+        ? myQuestion
           ? "YOUR INPUT NEEDED"
           : state.phase === "check-compile"
             ? "YOUR COMPILE PHASE"
@@ -2366,21 +2387,24 @@ function CompilePickerOverlay({
   client,
   gameId,
   onNotify,
+  question,
   lines,
 }: {
   state: RedactedState;
   client: ClientSocket;
   gameId: string;
   onNotify: NotifyFn;
+  question: Extract<Question, { kind: "compile-line" }>;
   lines: LineIdx[];
 }) {
   const player = state.players[state.activePlayerIdx];
   const choose = (l: LineIdx) => {
-    try {
-      send.chooseCompileLine(client, gameId, l);
-    } catch (e) {
-      onNotify((e as Error).message, "error");
+    const ans = answerForCompile(question, l);
+    if (!ans) {
+      onNotify("compile line not available", "error");
+      return;
     }
+    send.answer(client, gameId, ans);
   };
   return (
     <ModalOverlay>
@@ -2398,6 +2422,80 @@ function CompilePickerOverlay({
   );
 }
 
+/**
+ * Modal that surfaces the control-rearrange question. Six perm buttons + skip.
+ * Only fires when the active player holds Control; the engine emits this just
+ * before the action-phase question or compile-line question, so its visibility
+ * gates the rest of the turn.
+ */
+function RearrangeOverlay({
+  client,
+  gameId,
+  question,
+  onNotify,
+}: {
+  client: ClientSocket;
+  gameId: string;
+  question: Extract<Question, { kind: "control-rearrange" }>;
+  onNotify: NotifyFn;
+}) {
+  const perms: { order: [0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2]; label: string }[] = [
+    { order: [0, 1, 2], label: "1·2·3" },
+    { order: [0, 2, 1], label: "1·3·2" },
+    { order: [1, 0, 2], label: "2·1·3" },
+    { order: [1, 2, 0], label: "2·3·1" },
+    { order: [2, 0, 1], label: "3·1·2" },
+    { order: [2, 1, 0], label: "3·2·1" },
+  ];
+  const choose = (
+    arg: "skip" | { side: PlayerIdx; newOrder: [0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2] },
+  ) => {
+    const ans = answerForRearrange(question, arg);
+    if (!ans) {
+      onNotify("rearrange option not available", "error");
+      return;
+    }
+    send.answer(client, gameId, ans);
+  };
+  return (
+    <ModalOverlay>
+      <h2 style={modalTitle}>
+        Control — rearrange your protocols (optional)
+      </h2>
+      <p
+        className="mono"
+        style={{ fontSize: 11, letterSpacing: "0.16em", color: "var(--ink-dim)" }}
+      >
+        Reorder your three protocols before this {question.reason.includes("compile") ? "compile" : "action"}. Skip to leave them as-is.
+      </p>
+      <div className="row gap-3" style={{ flexWrap: "wrap" }}>
+        {perms.map((p) => (
+          <button
+            key={p.label}
+            className="cp-btn primary"
+            onClick={() => choose({ side: question.forPlayerIdx, newOrder: p.order })}
+          >
+            {p.label}
+          </button>
+        ))}
+        <button className="cp-btn ghost" onClick={() => choose("skip")}>
+          SKIP
+        </button>
+      </div>
+    </ModalOverlay>
+  );
+}
+
+function pendingPromptIsBanner(q: Question): boolean {
+  return (
+    q.kind === "choose-card" ||
+    q.kind === "choose-line" ||
+    q.kind === "choose-option" ||
+    q.kind === "discard-selection" ||
+    q.kind === "play-from-hand"
+  );
+}
+
 function PromptBanner({
   prompt,
   targets,
@@ -2409,7 +2507,7 @@ function PromptBanner({
   onConfirm,
   onSkip,
 }: {
-  prompt: Prompt;
+  prompt: Question;
   targets: PromptTargets;
   pickedCount: number;
   pendingCard: string | null;
@@ -2419,6 +2517,8 @@ function PromptBanner({
   onConfirm: () => void;
   onSkip: () => void;
 }) {
+  const discardCount =
+    prompt.kind === "discard-selection" ? (prompt.picks?.min ?? 1) : 0;
   const targetCount =
     prompt.kind === "choose-line" ? targets.lines.size : targets.cards.size;
 
@@ -2434,23 +2534,33 @@ function PromptBanner({
       instruction = pendingOption ? "Confirm your pick or choose another option" : "Pick an option";
       break;
     case "discard-selection":
-      instruction = `Select ${prompt.count} card${prompt.count === 1 ? "" : "s"} from your hand`;
+      instruction = `Select ${discardCount} card${discardCount === 1 ? "" : "s"} from your hand`;
       break;
     case "play-from-hand": {
+      // Derive orientation + lanes from the question's enumerated options.
+      let hasUp = false;
+      let hasDown = false;
+      const lanes = new Set<LineIdx>();
+      for (const opt of prompt.options) {
+        const p = opt.payload as { lineIdx: LineIdx; faceDown: boolean };
+        lanes.add(p.lineIdx);
+        if (p.faceDown) hasDown = true;
+        else hasUp = true;
+      }
       const parts: string[] = [];
-      if (prompt.orientation === "face-down") parts.push("face-down");
-      else if (prompt.orientation === "face-up") parts.push("face-up");
+      if (hasDown && !hasUp) parts.push("face-down");
+      else if (hasUp && !hasDown) parts.push("face-up");
+      const lanesArr = [...lanes].sort();
       const lineHint =
-        prompt.allowedLines.length < 3
-          ? ` to ${prompt.allowedLines.map((l) => `L${l + 1}`).join(" or ")}`
+        lanesArr.length < 3
+          ? ` to ${lanesArr.map((l) => `L${l + 1}`).join(" or ")}`
           : "";
       instruction = `Drag a card from your hand onto a lane to play${
         parts.length > 0 ? ` ${parts.join(", ")}` : ""
       }${lineHint}`;
       break;
     }
-    case "show-hand":
-      // Handled by ShowOppHandModal — banner is suppressed in this case.
+    default:
       instruction = "";
       break;
   }
@@ -2465,7 +2575,7 @@ function PromptBanner({
     (prompt.kind === "choose-card" && pendingCard !== null) ||
     (prompt.kind === "choose-line" && pendingLine !== null) ||
     (prompt.kind === "choose-option" && pendingOption !== null) ||
-    (prompt.kind === "discard-selection" && pickedCount === prompt.count);
+    (prompt.kind === "discard-selection" && pickedCount === discardCount);
 
   return (
     <div className="cp-prompt-banner">
@@ -2479,7 +2589,7 @@ function PromptBanner({
           )}
           {prompt.kind === "discard-selection" && (
             <span className="cp-prompt-banner-count">
-              {pickedCount}/{prompt.count} selected
+              {pickedCount}/{discardCount} selected
             </span>
           )}
         </div>
@@ -2489,15 +2599,18 @@ function PromptBanner({
 
       {prompt.kind === "choose-option" && (
         <div className="cp-prompt-banner-options">
-          {prompt.options.map((o) => (
-            <button
-              key={o.id}
-              className={`cp-btn ${pendingOption === o.id ? "primary is-selected" : "ghost"}`}
-              onClick={() => onOption(o.id)}
-            >
-              {o.label}
-            </button>
-          ))}
+          {prompt.options.map((o) => {
+            const innerId = (o.payload as { optionId: string }).optionId;
+            return (
+              <button
+                key={o.id}
+                className={`cp-btn ${pendingOption === innerId ? "primary is-selected" : "ghost"}`}
+                onClick={() => onOption(innerId)}
+              >
+                {o.label}
+              </button>
+            );
+          })}
         </div>
       )}
 

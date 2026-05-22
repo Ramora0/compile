@@ -3,6 +3,7 @@ import { newGame, placeCard } from "./helpers/harness.js";
 import { Game } from "../src/engine/game.js";
 import { applyAction, validateAction } from "../src/engine/actions.js";
 import { registerMockCard, resetCardRegistry } from "./helpers/mockCards.js";
+import { commitDiscard } from "./helpers/answers.js";
 
 describe("validateAction", () => {
   it("rejects actions submitted by the inactive player", () => {
@@ -105,12 +106,11 @@ describe("Game.run → Clear Cache", () => {
     expect(g.players[0].hand.length).toBe(7);
     const game = new Game(g);
     const blocked = game.run();
-    expect(blocked.kind).toBe("awaiting-prompt");
-    expect(g.pendingPrompt).not.toBeNull();
-    expect(g.pendingPrompt?.kind).toBe("discard-selection");
-    expect(g.pendingPrompt?.forPlayerIdx).toBe(0);
-    if (g.pendingPrompt?.kind === "discard-selection") {
-      expect(g.pendingPrompt.count).toBe(2);
+    expect(blocked.kind).toBe("awaiting-answer");
+    expect(g.pendingQuestion?.kind).toBe("discard-selection");
+    expect(g.pendingQuestion?.forPlayerIdx).toBe(0);
+    if (g.pendingQuestion?.kind === "discard-selection") {
+      expect(g.pendingQuestion.picks?.min).toBe(2);
     }
   });
 
@@ -122,13 +122,7 @@ describe("Game.run → Clear Cache", () => {
       { instanceId: "x2", cardId: "spirit-0", faceDown: false, ownerIdx: 0 },
     );
     const game = new Game(g);
-    game.run();
-    const promptId = g.pendingPrompt!.promptId;
-    const blocked = game.resolvePrompt({
-      kind: "discard-chosen",
-      promptId,
-      instanceIds: ["x1", "x2"],
-    });
+    const blocked = commitDiscard(game, 0, ["x1", "x2"]);
     // Discards landed in trash; hand is back to 5.
     expect(g.players[0].hand.length).toBe(5);
     expect(g.players[0].trash.map((c) => c.instanceId)).toEqual(
@@ -137,7 +131,7 @@ describe("Game.run → Clear Cache", () => {
     // And we've moved off check-cache — either turn ended (start of opponent's
     // turn) or we're blocked on the opponent's action phase.
     expect(g.phase === "action" || g.phase === "start").toBe(true);
-    expect(blocked.kind === "awaiting-action" || blocked.kind === "awaiting-prompt").toBe(true);
+    expect(blocked.kind).toBe("awaiting-answer");
   });
 
   it("respects skip-phase override (Spirit 0 bottom) and does not prompt", () => {
@@ -162,9 +156,10 @@ describe("Game.run → Clear Cache", () => {
     );
     const game = new Game(g);
     const blocked = game.run();
-    expect(g.pendingPrompt).toBeNull();
+    // Phase skipped means no discard-selection question fired.
+    expect(g.pendingQuestion?.kind).not.toBe("discard-selection");
     // Hand stays over the limit because the phase was skipped.
     expect(g.players[0].hand.length).toBe(7);
-    expect(blocked.kind).not.toBe("awaiting-prompt");
+    expect(blocked.kind).toBe("awaiting-answer");
   });
 });

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { connect, send, type ClientSocket } from "./socket.js";
 import type {
-  DraftPromptEv,
   PlayerIdx,
   ProtocolName,
+  Question,
   RedactedState,
 } from "./types.js";
+import { answerForDraftPick } from "./answers.js";
 import { BoardScreen } from "./BoardScreen.js";
 import { CardDetailPanel, HoverProvider } from "./hover.js";
 import { AnchorProvider } from "./ui/anchors.js";
@@ -76,11 +77,8 @@ interface Session {
   gameId: string | null;
   /** My seat in the match, set on the `joined` event. */
   myIdx: PlayerIdx | null;
-  draftPrompt: DraftPromptEv | null;
   state: RedactedState | null;
   connStatus: ConnStatus;
-  /** Opponent's connectivity. null = unknown (haven't seen them yet). */
-  opponentOnline: boolean | null;
 }
 
 export function App() {
@@ -116,9 +114,6 @@ export function App() {
 
       sk.on("connect", () => {
         s.connStatus = "connected";
-        // On (re)connect, restore our seat: first connect → create or join;
-        // later connects → re-join with the same playerId so the server
-        // reattaches our slot inside the disconnect grace window.
         const cur = sessionRef.current;
         const knownGameId = cur?.gameId ?? (intent.kind === "join" ? intent.gameId : null);
         if (knownGameId) {
@@ -158,33 +153,10 @@ export function App() {
         tick();
       });
 
-      sk.on("draft_prompt", (p: DraftPromptEv) => {
-        s.draftPrompt = p;
-        tick();
-      });
-
-      sk.on("draft_pick_made", () => {
-        s.draftPrompt = null;
-        tick();
-      });
-
-      sk.on("draft_completed", () => {
-        s.draftPrompt = null;
-        tick();
-      });
-
       sk.on("state_update", (p: RedactedState) => {
         s.state = p;
         tick();
       });
-
-      sk.on("opponent_status", (p: { playerIdx: PlayerIdx; online: boolean }) => {
-        if (s.myIdx === null || p.playerIdx === s.myIdx) return;
-        s.opponentOnline = p.online;
-        tick();
-      });
-
-      sk.on("game_over", () => tick());
     },
     [pushNotification, tick],
   );
@@ -196,10 +168,8 @@ export function App() {
       client,
       gameId: null,
       myIdx: null,
-      draftPrompt: null,
       state: null,
       connStatus: "connecting",
-      opponentOnline: null,
     };
     setSession(s);
     wireSocket(s, { kind: "create" });
@@ -213,24 +183,14 @@ export function App() {
         client,
         gameId,
         myIdx: null,
-        draftPrompt: null,
         state: null,
         connStatus: "connecting",
-        opponentOnline: null,
       };
       setSession(s);
       wireSocket(s, { kind: "join", gameId });
     },
     [playerId, wireSocket],
   );
-
-  const leaveGame = useCallback(() => {
-    const s = sessionRef.current;
-    if (s) s.client.socket.disconnect();
-    saveLastGame(null);
-    setSession(null);
-    setError(null);
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -254,18 +214,19 @@ export function App() {
     );
   }
 
+  const opponentOnline = session.state?.opponentOnline;
+
   return (
     <HoverProvider>
       <AnchorProvider>
         <SessionView
           session={session}
-          onLeave={leaveGame}
           onNotify={pushNotification}
           error={error}
           onDismissError={() => setError(null)}
         />
         <ConnectionBanner status={session.connStatus} />
-        {session.opponentOnline === false && session.myIdx !== null && (
+        {opponentOnline === false && session.myIdx !== null && (
           <OpponentOfflineBanner />
         )}
         <CardDetailPanel />
@@ -281,49 +242,55 @@ export function App() {
 
 function SessionView({
   session,
-  onLeave,
   onNotify,
   error,
   onDismissError,
 }: {
   session: Session;
-  onLeave: () => void;
   onNotify: NotifyFn;
   error: string | null;
   onDismissError: () => void;
 }) {
-  // Board takes priority once the game state has arrived.
-  if (session.state && session.myIdx !== null && session.gameId) {
-    return (
-      <BoardScreen
-        state={session.state}
-        client={session.client}
-        myIdx={session.myIdx}
-        gameId={session.gameId}
-        onNotify={onNotify}
-      />
-    );
+  const state = session.state;
+  const myIdx = session.myIdx;
+  const gameId = session.gameId;
+
+  if (!state || myIdx === null || !gameId) {
+    return <Connecting />;
   }
 
-  if (session.draftPrompt && session.myIdx !== null && session.gameId) {
-    if (session.draftPrompt.playerIdx === session.myIdx) {
+  // Active draft: route into the draft picker / opponent-drafting screen.
+  if (state.draft) {
+    const q = state.pendingQuestion;
+    if (q && q.kind === "draft-pick" && q.forPlayerIdx === myIdx) {
       return (
         <DraftScreen
           client={session.client}
-          gameId={session.gameId}
-          prompt={session.draftPrompt}
+          gameId={gameId}
+          draft={state.draft}
+          question={q}
           error={error}
-          onError={onDismissError}
+          onDismissError={onDismissError}
         />
       );
     }
-    return <OpponentDraftingScreen pool={session.draftPrompt.remainingPool} />;
+    return <OpponentDraftingScreen pool={state.draft.remainingPool} />;
   }
 
-  if (session.gameId && session.myIdx !== null) {
-    return <WaitingForOpponentScreen gameId={session.gameId} onLeave={onLeave} />;
-  }
+  // No draft → board (which renders its own overlays for compile-line,
+  // rearrange, prompts, game-over).
+  return (
+    <BoardScreen
+      state={state}
+      client={session.client}
+      myIdx={myIdx}
+      gameId={gameId}
+      onNotify={onNotify}
+    />
+  );
+}
 
+function Connecting() {
   return (
     <div className="cp-screen">
       <div className="cp-screen-inner">
@@ -444,107 +411,28 @@ function LobbyScreen({
 }
 
 // ────────────────────────────────────────────────────────────
-// Waiting for the opponent to join the room
-// ────────────────────────────────────────────────────────────
-
-function WaitingForOpponentScreen({
-  gameId,
-  onLeave,
-}: {
-  gameId: string;
-  onLeave: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const copy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(gameId);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // ignore
-    }
-  }, [gameId]);
-
-  return (
-    <div className="cp-screen">
-      <div className="cp-screen-inner">
-        <div>
-          <div
-            className="mono"
-            style={{
-              fontSize: 11,
-              letterSpacing: "0.24em",
-              color: "var(--purple-300)",
-              marginBottom: 6,
-            }}
-          >
-            WAITING FOR OPPONENT
-          </div>
-          <h1 className="cp-title" style={{ fontSize: 36 }}>
-            Share the game code
-          </h1>
-          <p className="cp-subtitle">
-            Send this to your opponent. They paste it into the JOIN GAME field on their device.
-            The match starts as soon as they connect.
-          </p>
-        </div>
-
-        <div
-          className="cp-banner"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 16,
-            padding: "16px 20px",
-          }}
-        >
-          <span
-            className="mono"
-            style={{
-              fontSize: 18,
-              letterSpacing: "0.14em",
-              flex: 1,
-              userSelect: "all",
-            }}
-          >
-            {gameId}
-          </span>
-          <button className="cp-btn" onClick={copy}>
-            {copied ? "COPIED ✓" : "COPY CODE"}
-          </button>
-        </div>
-
-        <div>
-          <button className="cp-btn ghost" onClick={onLeave}>
-            CANCEL
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ────────────────────────────────────────────────────────────
 // Draft (single perspective)
 // ────────────────────────────────────────────────────────────
 
 function DraftScreen({
   client,
   gameId,
-  prompt,
+  draft,
+  question,
   error,
-  onError,
+  onDismissError,
 }: {
   client: ClientSocket;
   gameId: string;
-  prompt: DraftPromptEv;
+  draft: NonNullable<RedactedState["draft"]>;
+  question: Extract<Question, { kind: "draft-pick" }>;
   error: string | null;
-  onError: () => void;
+  onDismissError: () => void;
 }) {
-  const need = pickCountFor(prompt.pickCount);
+  const need = question.pickCount;
   const [picked, setPicked] = useState<ProtocolName[]>([]);
 
-  useEffect(() => setPicked([]), [prompt.pickCount]);
+  useEffect(() => setPicked([]), [question.questionId]);
 
   const toggle = (p: ProtocolName) => {
     setPicked((cur) =>
@@ -554,22 +442,20 @@ function DraftScreen({
 
   const submit = () => {
     if (picked.length !== need) return;
-    try {
-      send.draftPick(client, gameId, picked);
-    } catch (e) {
-      // surface via the parent banner; this catch is just to keep React quiet
-      console.error(e);
-    }
+    const answer = answerForDraftPick(question, picked);
+    if (!answer) return;
+    send.answer(client, gameId, answer);
   };
 
   const randomize = () => {
-    const pool = [...prompt.remainingPool];
+    const pool = [...draft.remainingPool];
     const picks: ProtocolName[] = [];
     for (let i = 0; i < need && pool.length > 0; i++) {
       const idx = Math.floor(Math.random() * pool.length);
       picks.push(pool.splice(idx, 1)[0]!);
     }
-    send.draftPick(client, gameId, picks);
+    const answer = answerForDraftPick(question, picks);
+    if (answer) send.answer(client, gameId, answer);
   };
 
   return (
@@ -585,7 +471,7 @@ function DraftScreen({
               marginBottom: 6,
             }}
           >
-            YOUR DRAFT · PHASE {prompt.pickCount + 1}
+            YOUR DRAFT · PICK {draft.picks.length + 1}/4
           </div>
           <h1 className="cp-title" style={{ fontSize: 36 }}>
             Pick {need} protocol{need > 1 ? "s" : ""}
@@ -600,14 +486,14 @@ function DraftScreen({
             <span className="mono" style={{ fontSize: 11, letterSpacing: "0.14em" }}>
               {error}
             </span>
-            <button className="cp-btn ghost" onClick={onError}>
+            <button className="cp-btn ghost" onClick={onDismissError}>
               DISMISS
             </button>
           </div>
         )}
 
         <div className="cp-protocol-pool">
-          {prompt.remainingPool.map((p) => (
+          {draft.remainingPool.map((p) => (
             <div
               key={p}
               className={`cp-protocol-pill${picked.includes(p) ? " selected" : ""}`}
@@ -662,10 +548,6 @@ function OpponentDraftingScreen({ pool }: { pool: ProtocolName[] }) {
       </div>
     </div>
   );
-}
-
-function pickCountFor(pickCount: number): number {
-  return [1, 2, 2, 1][pickCount] ?? 1;
 }
 
 // ────────────────────────────────────────────────────────────

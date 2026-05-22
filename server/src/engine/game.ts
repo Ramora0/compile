@@ -7,6 +7,10 @@
  *     runtime pumps them to completion (or until a prompt suspends).
  *   - On returning to the phase machine, control loops until the game blocks
  *     on external input.
+ *
+ * External callers drive the engine through a single entry point: `commit`.
+ * Whenever `run()` blocks it populates `state.pendingQuestion` with the
+ * enumerated options the addressee can pick from.
  */
 
 import { EffectRuntime } from "./runtime.js";
@@ -18,59 +22,99 @@ import {
   recomputeOverrides,
 } from "./reactive/index.js";
 import { performCompile } from "./compile.js";
-import { applyAction, type PlayerAction } from "./actions.js";
+import { applyAction } from "./actions.js";
 import { consumeControl, rearrangeProtocols } from "./control.js";
 import type { GameState, LineIdx, Phase, PlayerIdx } from "./types.js";
-import type { Op, OpResult, PromptResponse } from "./ops.js";
+import type { Op, OpResult, Prompt, PromptResponse } from "./ops.js";
+import {
+  enumerateActionOptions,
+  enumerateCompileOptions,
+  enumeratePromptOptions,
+  enumerateRearrangeOptions,
+} from "./enumerate.js";
+import type {
+  ActionPayload,
+  Answer,
+  CompileLinePayload,
+  Option,
+  Question,
+  RearrangePayload,
+} from "./question.js";
 
 export type EngineBlocked =
-  | { kind: "awaiting-action" }
-  | { kind: "awaiting-prompt" }
-  | { kind: "awaiting-compile-choice"; lines: number[] }
-  | { kind: "awaiting-control-rearrange" }
+  | { kind: "awaiting-answer" }
   | { kind: "game-over"; winnerIdx: 0 | 1 };
+
+export type QuestionIdGen = () => string;
 
 export class Game {
   readonly runtime: EffectRuntime;
+  /** Per-Game monotonic question-id source. May be overridden via constructor for per-Match continuity. */
+  private readonly nextQuestionId: QuestionIdGen;
+  private localQuestionCounter = 0;
+  /**
+   * Once the engine has emitted a rearrange question for the current
+   * Check-Compile entry / Action-phase entry, don't emit it again. Reset on
+   * phase transition.
+   */
+  private rearrangeAskedThisPhase = false;
 
-  constructor(public readonly state: GameState) {
+  constructor(public readonly state: GameState, nextQuestionId?: QuestionIdGen) {
     this.runtime = new EffectRuntime(state);
     recomputeOverrides(state);
+    this.nextQuestionId = nextQuestionId ?? (() => `q${++this.localQuestionCounter}`);
   }
 
   /**
    * Drive the engine until external input is needed. Alternates between
-   * phase advancement and the effect pump.
+   * phase advancement and the effect pump. On block, populates
+   * `state.pendingQuestion` with the question to surface to the addressee.
    */
   run(): EngineBlocked {
     for (let i = 0; i < 10_000; i++) {
-      // Drain any pending effects first.
       this.runtime.pump();
-      if (this.runtime.isAwaitingPrompt) return { kind: "awaiting-prompt" };
+      if (this.runtime.isAwaitingPrompt) {
+        this.setQuestionForPrompt(this.state.pendingPrompt!);
+        return { kind: "awaiting-answer" };
+      }
 
-      const before = this.state.phase;
       const res = this.tickPhase();
 
-      if (res.kind === "advanced") {
-        // Phase changed — loop and let any new triggers fire.
-        continue;
+      if (res.kind === "advanced") continue;
+      if (res.kind === "game-over") {
+        this.state.pendingQuestion = null;
+        return { kind: "game-over", winnerIdx: res.winnerIdx };
       }
-      if (res.kind === "game-over") return { kind: "game-over", winnerIdx: res.winnerIdx };
-      if (res.kind === "awaiting-action") return { kind: "awaiting-action" };
-      if (res.kind === "awaiting-prompt") return { kind: "awaiting-prompt" };
+      if (res.kind === "awaiting-prompt") {
+        this.setQuestionForPrompt(this.state.pendingPrompt!);
+        return { kind: "awaiting-answer" };
+      }
+      if (res.kind === "awaiting-action") {
+        if (this.shouldOfferRearrange(res.playerIdx)) {
+          this.setRearrangeQuestion(res.playerIdx, "before-action");
+        } else {
+          this.setActionQuestion(res.playerIdx);
+        }
+        return { kind: "awaiting-answer" };
+      }
       if (res.kind === "awaiting-compile-choice") {
-        return { kind: "awaiting-compile-choice", lines: res.lines };
+        if (this.shouldOfferRearrange(res.playerIdx)) {
+          this.setRearrangeQuestion(res.playerIdx, "before-compile");
+        } else {
+          this.setCompileQuestion(res.playerIdx);
+        }
+        return { kind: "awaiting-answer" };
       }
       if (res.kind === "awaiting-control-rearrange") {
-        return { kind: "awaiting-control-rearrange" };
+        // Phase-machine flagged rearrange explicitly — honour it.
+        this.setRearrangeQuestion(res.playerIdx, "before-action");
+        return { kind: "awaiting-answer" };
       }
     }
     throw new Error("game.run() exceeded safety limit");
   }
 
   private tickPhase(): StepResult {
-    // Hooks that fire ON ENTRY to specific phases. The phase machine itself
-    // is purely structural; the engine layers reactive behaviour on top.
     if (this.state.phase === "start" && !this.startTriggersFired) {
       this.fireStartTriggers();
       this.startTriggersFired = true;
@@ -79,7 +123,6 @@ export class Game {
       this.fireEndTriggers();
       this.endTriggersFired = true;
     }
-    // Skip Check Cache if a static-rule override says to.
     if (
       this.state.phase === "check-cache" &&
       isPhaseSkippedFor(this.state, "check-cache", this.state.activePlayerIdx)
@@ -87,9 +130,6 @@ export class Game {
       this.state.phase = "end";
       return { kind: "advanced", from: "check-cache", to: "end" };
     }
-    // Clear Cache (rules.md:42): on entry to Check Cache, if hand > 5 prompt
-    // the active player to discard down to 5. Push the generator and return
-    // "advanced" so the next iteration pumps it (which suspends on the prompt).
     if (this.state.phase === "check-cache" && !this.checkCacheTriggered) {
       this.checkCacheTriggered = true;
       const hand = this.state.players[this.state.activePlayerIdx].hand;
@@ -104,13 +144,15 @@ export class Game {
 
     const result = step(this.state);
 
-    // Reset trigger guards when leaving the phase.
     if (result.kind === "advanced") {
       if (result.from === "start") this.startTriggersFired = false;
       if (result.from === "end") this.endTriggersFired = false;
       if (result.from === "check-cache" && result.to !== "check-cache") {
         this.checkCacheTriggered = false;
       }
+      // Reset rearrange-asked flag whenever we cross a phase boundary, so the
+      // question can re-fire on the next eligible entry.
+      this.rearrangeAskedThisPhase = false;
     }
 
     return result;
@@ -130,43 +172,251 @@ export class Game {
     if (triggers.length > 0) fireTriggers(this.runtime, this.state, triggers);
   }
 
-  // ---------- External input handlers ----------
+  private shouldOfferRearrange(playerIdx: PlayerIdx): boolean {
+    if (this.rearrangeAskedThisPhase) return false;
+    return this.state.control === playerIdx;
+  }
 
-  /** Submit the active player's action (Play or Refresh) during the Action phase. */
-  submitAction(playerIdx: PlayerIdx, action: PlayerAction): EngineBlocked {
-    applyAction(this.runtime, this.state, playerIdx, action);
+  // ---------- Question construction ----------
+
+  private setQuestionForPrompt(prompt: Prompt): void {
+    const options = enumeratePromptOptions(this.state, prompt);
+    const base = {
+      questionId: prompt.promptId,
+      forPlayerIdx: prompt.forPlayerIdx,
+      reason: prompt.reason,
+      options,
+    };
+    let q: Question;
+    switch (prompt.kind) {
+      case "choose-card":
+        q = { ...base, kind: "choose-card", optional: prompt.optional };
+        break;
+      case "choose-line":
+        q = { ...base, kind: "choose-line" };
+        break;
+      case "choose-option":
+        q = { ...base, kind: "choose-option" };
+        break;
+      case "discard-selection":
+        q = {
+          ...base,
+          kind: "discard-selection",
+          picks: { min: prompt.count, max: prompt.count },
+        };
+        break;
+      case "play-from-hand":
+        q = { ...base, kind: "play-from-hand" };
+        break;
+      case "show-hand":
+        q = {
+          ...base,
+          kind: "show-hand",
+          ownerIdx: prompt.ownerIdx,
+          cards: prompt.cards,
+        };
+        break;
+    }
+    this.state.pendingQuestion = q;
+  }
+
+  private setActionQuestion(playerIdx: PlayerIdx): void {
+    this.state.pendingQuestion = {
+      kind: "action",
+      questionId: this.nextQuestionId(),
+      forPlayerIdx: playerIdx,
+      reason: "action-phase",
+      options: enumerateActionOptions(this.state, playerIdx),
+    };
+  }
+
+  private setCompileQuestion(playerIdx: PlayerIdx): void {
+    this.state.pendingQuestion = {
+      kind: "compile-line",
+      questionId: this.nextQuestionId(),
+      forPlayerIdx: playerIdx,
+      reason: "check-compile",
+      options: enumerateCompileOptions(this.state, playerIdx),
+    };
+  }
+
+  private rearrangeContext: "before-action" | "before-compile" | null = null;
+
+  private setRearrangeQuestion(
+    playerIdx: PlayerIdx,
+    context: "before-action" | "before-compile",
+  ): void {
+    this.rearrangeAskedThisPhase = true;
+    this.rearrangeContext = context;
+    // Allow rearranging either side; pre-build the option set for the active
+    // player's own side (most common). The client receives all 6 perms + skip;
+    // dual-side rearrange isn't currently exposed in the UI — keep that for a
+    // follow-up if needed.
+    this.state.pendingQuestion = {
+      kind: "control-rearrange",
+      questionId: this.nextQuestionId(),
+      forPlayerIdx: playerIdx,
+      reason: context === "before-compile" ? "rearrange-before-compile" : "rearrange-before-action",
+      options: enumerateRearrangeOptions(playerIdx),
+    };
+  }
+
+  // ---------- Commit (single entry point) ----------
+
+  /**
+   * Apply an Answer to the current pending question. Validates the answer
+   * matches the outstanding question, dispatches by question kind, and runs
+   * the engine to the next block point.
+   */
+  commit(playerIdx: PlayerIdx, answer: Answer): EngineBlocked {
+    const q = this.state.pendingQuestion;
+    if (!q) throw new Error("no pending question");
+    if (q.forPlayerIdx !== playerIdx) {
+      throw new Error(`question is for player ${q.forPlayerIdx}, not ${playerIdx}`);
+    }
+    if (answer.questionId !== q.questionId) {
+      throw new Error(`stale answer: expected ${q.questionId}, got ${answer.questionId}`);
+    }
+
+    if (answer.kind === "multi") {
+      return this.commitMulti(q, answer.optionIds);
+    }
+
+    const opt = q.options.find((o) => o.id === answer.optionId);
+    if (!opt) throw new Error(`unknown optionId: ${answer.optionId}`);
+
+    this.state.pendingQuestion = null;
+
+    switch (q.kind) {
+      case "action":
+        return this.applyActionPayload(playerIdx, opt.payload as ActionPayload);
+      case "compile-line":
+        return this.applyCompilePayload(opt.payload as CompileLinePayload);
+      case "control-rearrange":
+        return this.applyRearrangePayload(playerIdx, opt.payload as RearrangePayload);
+      case "choose-card":
+      case "choose-line":
+      case "choose-option":
+      case "play-from-hand":
+      case "show-hand":
+        return this.applyPromptPayload(q, opt);
+      case "discard-selection":
+        throw new Error("discard-selection requires a multi-answer");
+      case "draft-pick":
+        throw new Error("draft-pick is handled at the match layer, not the Game");
+    }
+  }
+
+  private commitMulti(q: Question, optionIds: string[]): EngineBlocked {
+    if (q.kind !== "discard-selection") {
+      throw new Error(`multi-answer not valid for question kind ${q.kind}`);
+    }
+    if (q.picks && (optionIds.length < q.picks.min || optionIds.length > q.picks.max)) {
+      throw new Error(
+        `expected ${q.picks.min}-${q.picks.max} picks, got ${optionIds.length}`,
+      );
+    }
+    const instanceIds: string[] = [];
+    for (const id of optionIds) {
+      const opt = q.options.find((o) => o.id === id);
+      if (!opt) throw new Error(`unknown optionId: ${id}`);
+      const payload = opt.payload as { instanceId: string };
+      instanceIds.push(payload.instanceId);
+    }
+    this.state.pendingQuestion = null;
+    const promptId = q.questionId;
+    this.runtime.resolvePrompt({
+      kind: "discard-chosen",
+      promptId,
+      instanceIds,
+    });
     return this.run();
   }
 
-  /**
-   * Resolve a forced-compile line choice during Check Compile. If the active
-   * player holds Control they may rearrange protocols first; that's submitted
-   * separately via {@link submitRearrange} before calling this.
-   */
-  chooseCompileLine(lineIdx: LineIdx): EngineBlocked {
+  // ---------- Payload application ----------
+
+  private applyActionPayload(playerIdx: PlayerIdx, payload: ActionPayload): EngineBlocked {
+    if (payload.kind === "refresh") {
+      applyAction(this.runtime, this.state, playerIdx, { kind: "refresh" });
+    } else {
+      applyAction(this.runtime, this.state, playerIdx, {
+        kind: "play",
+        instanceId: payload.instanceId,
+        lineIdx: payload.lineIdx,
+        faceDown: payload.faceDown,
+      });
+    }
+    return this.run();
+  }
+
+  private applyCompilePayload(payload: CompileLinePayload): EngineBlocked {
     if (this.state.phase !== "check-compile") {
-      throw new Error(`chooseCompileLine called during phase=${this.state.phase}`);
+      throw new Error(`compile-line answered during phase=${this.state.phase}`);
     }
     const playerIdx = this.state.activePlayerIdx;
-    performCompile(this.runtime, this.state, playerIdx, lineIdx);
+    performCompile(this.runtime, this.state, playerIdx, payload.lineIdx);
     if (this.state.winnerIdx !== null) {
+      this.state.pendingQuestion = null;
       return { kind: "game-over", winnerIdx: this.state.winnerIdx };
     }
     return this.run();
   }
 
-  /** Apply a Control-component-driven protocol rearrangement on the named side. */
-  submitRearrange(side: PlayerIdx, newOrder: readonly [0|1|2, 0|1|2, 0|1|2]): void {
-    if (this.state.control !== this.state.activePlayerIdx) {
+  private applyRearrangePayload(
+    playerIdx: PlayerIdx,
+    payload: RearrangePayload,
+  ): EngineBlocked {
+    if (this.state.control !== playerIdx) {
       throw new Error("only the Control holder may rearrange");
     }
-    rearrangeProtocols(this.state, side, newOrder);
-    consumeControl(this.state);
-    recomputeOverrides(this.state);
+    if (payload.kind === "rearrange") {
+      rearrangeProtocols(this.state, payload.side, payload.newOrder);
+      consumeControl(this.state);
+      recomputeOverrides(this.state);
+    }
+    this.rearrangeContext = null;
+    // rearrangeAskedThisPhase stays true so run() doesn't re-emit the same
+    // rearrange question; it'll surface the next phase-appropriate question
+    // (compile-line or action).
+    return this.run();
   }
 
-  /** Provide a player's response to a pending prompt. */
-  resolvePrompt(response: PromptResponse): EngineBlocked {
+  private applyPromptPayload(q: Question, opt: Option): EngineBlocked {
+    const promptId = q.questionId;
+    let response: PromptResponse;
+    switch (q.kind) {
+      case "choose-card": {
+        const p = opt.payload as { instanceId: string | null };
+        response = { kind: "card-chosen", promptId, instanceId: p.instanceId };
+        break;
+      }
+      case "choose-line": {
+        const p = opt.payload as { lineIdx: LineIdx };
+        response = { kind: "line-chosen", promptId, lineIdx: p.lineIdx };
+        break;
+      }
+      case "choose-option": {
+        const p = opt.payload as { optionId: string };
+        response = { kind: "option-chosen", promptId, optionId: p.optionId };
+        break;
+      }
+      case "play-from-hand": {
+        const p = opt.payload as { instanceId: string; lineIdx: LineIdx; faceDown: boolean };
+        response = {
+          kind: "play-from-hand-chosen",
+          promptId,
+          instanceId: p.instanceId,
+          lineIdx: p.lineIdx,
+          faceDown: p.faceDown,
+        };
+        break;
+      }
+      case "show-hand":
+        response = { kind: "ack", promptId };
+        break;
+      default:
+        throw new Error(`applyPromptPayload: unexpected kind ${q.kind}`);
+    }
     this.runtime.resolvePrompt(response);
     return this.run();
   }

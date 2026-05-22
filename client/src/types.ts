@@ -1,5 +1,5 @@
 // Mirror of the subset of server types the UI needs. Keeping these in-sync
-// with `server/src/server/redact.ts` and `server/src/engine/{types,ops,actions}.ts`
+// with `server/src/server/redact.ts` and `server/src/engine/question.ts`
 // is a manual exercise; the client doesn't import from the server package.
 
 export type PlayerIdx = 0 | 1;
@@ -36,92 +36,96 @@ export interface RedactedPlayer {
   protocols: { protocol: string; compiled: boolean }[];
 }
 
-export type CardFilter = {
-  side?: "self" | "opp" | "any";
-  faceUp?: boolean;
-  faceDown?: boolean;
-  covered?: boolean;
-  uncovered?: boolean;
-  inLines?: LineIdx[];
-  ownerIdx?: PlayerIdx;
-  instanceIds?: string[];
-};
-
-export type Prompt =
-  | {
-      kind: "choose-card";
-      promptId: string;
-      forPlayerIdx: PlayerIdx;
-      filter: CardFilter;
-      optional: boolean;
-      reason: string;
-    }
-  | {
-      kind: "choose-line";
-      promptId: string;
-      forPlayerIdx: PlayerIdx;
-      allowedLines: LineIdx[];
-      reason: string;
-    }
-  | {
-      kind: "choose-option";
-      promptId: string;
-      forPlayerIdx: PlayerIdx;
-      options: { id: string; label: string }[];
-      reason: string;
-    }
-  | {
-      kind: "discard-selection";
-      promptId: string;
-      forPlayerIdx: PlayerIdx;
-      count: number;
-      reason: string;
-    }
-  | {
-      kind: "play-from-hand";
-      promptId: string;
-      forPlayerIdx: PlayerIdx;
-      reason: string;
-      allowedLines: LineIdx[];
-      orientation: "any" | "face-up" | "face-down";
-    }
-  | {
-      kind: "show-hand";
-      promptId: string;
-      forPlayerIdx: PlayerIdx;
-      reason: string;
-      ownerIdx: PlayerIdx;
-      cards: { instanceId: string; cardId: string }[];
-    };
-
-export type PromptResponse =
-  | { kind: "card-chosen"; promptId: string; instanceId: string | null }
-  | { kind: "line-chosen"; promptId: string; lineIdx: LineIdx }
-  | { kind: "option-chosen"; promptId: string; optionId: string }
-  | { kind: "discard-chosen"; promptId: string; instanceIds: string[] }
-  | {
-      kind: "play-from-hand-chosen";
-      promptId: string;
-      instanceId: string;
-      lineIdx: LineIdx;
-      faceDown: boolean;
-    }
-  | { kind: "ack"; promptId: string };
-
 export type ControlState = PlayerIdx | "neutral";
 
-/**
- * Lightweight description of a prompt awaiting the *opponent*. The server
- * sends this in place of the full prompt (which is redacted for the
- * non-target viewer) so the UI can describe what they're doing.
- */
-export interface OpponentPromptSummary {
-  kind: Prompt["kind"];
+// ---------- Question / Option / Answer ----------
+
+export type DraftPickPayload = { protocols: ProtocolName[] };
+export type ActionPayload =
+  | { kind: "play"; instanceId: string; lineIdx: LineIdx; faceDown: boolean }
+  | { kind: "refresh" };
+export type CompileLinePayload = { lineIdx: LineIdx };
+export type RearrangePayload =
+  | { kind: "rearrange"; side: PlayerIdx; newOrder: [0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2] }
+  | { kind: "skip" };
+export type ChooseCardPayload = { instanceId: string | null };
+export type ChooseLinePayload = { lineIdx: LineIdx };
+export type ChooseOptionPayload = { optionId: string };
+export type DiscardSelectionPayload = { instanceId: string };
+export type PlayFromHandPayload = { instanceId: string; lineIdx: LineIdx; faceDown: boolean };
+export type AckPayload = Record<string, never>;
+
+export type OptionPayload =
+  | DraftPickPayload
+  | ActionPayload
+  | CompileLinePayload
+  | RearrangePayload
+  | ChooseCardPayload
+  | ChooseLinePayload
+  | ChooseOptionPayload
+  | DiscardSelectionPayload
+  | PlayFromHandPayload
+  | AckPayload;
+
+export interface Option {
+  id: string;
+  label: string;
+  payload: OptionPayload;
+}
+
+interface QuestionBase {
+  questionId: string;
+  forPlayerIdx: PlayerIdx;
+  reason: string;
+  options: Option[];
+  picks?: { min: number; max: number };
+}
+
+export type Question =
+  | (QuestionBase & { kind: "draft-pick"; pickCount: 1 | 2 })
+  | (QuestionBase & { kind: "action" })
+  | (QuestionBase & { kind: "compile-line" })
+  | (QuestionBase & { kind: "control-rearrange" })
+  | (QuestionBase & { kind: "choose-card"; optional: boolean })
+  | (QuestionBase & { kind: "choose-line" })
+  | (QuestionBase & { kind: "choose-option" })
+  | (QuestionBase & { kind: "discard-selection" })
+  | (QuestionBase & { kind: "play-from-hand" })
+  | (QuestionBase & {
+      kind: "show-hand";
+      ownerIdx: PlayerIdx;
+      cards: { instanceId: string; cardId: string }[];
+    });
+
+export type QuestionKind = Question["kind"];
+
+export interface OpponentQuestionSummary {
+  kind: QuestionKind;
   reason: string;
   forPlayerIdx: PlayerIdx;
   /** Only populated for discard-selection. */
   count?: number;
 }
+
+export type Answer =
+  | { kind: "single"; questionId: string; optionId: string }
+  | { kind: "multi"; questionId: string; optionIds: string[] };
+
+// ---------- Draft snapshot ----------
+
+export interface DraftPick {
+  playerIdx: PlayerIdx;
+  protocols: ProtocolName[];
+}
+
+export interface RedactedDraft {
+  picks: DraftPick[];
+  remainingPool: ProtocolName[];
+  whoseTurn: PlayerIdx | null;
+  pickCount: 1 | 2;
+}
+
+// ---------- Redacted state ----------
 
 export interface RedactedState {
   id: string;
@@ -129,22 +133,15 @@ export interface RedactedState {
   activePlayerIdx: PlayerIdx;
   turnNumber: number;
   control: ControlState;
-  winnerIdx: PlayerIdx | null;
-  pendingPrompt: Prompt | null;
-  opponentPromptSummary: OpponentPromptSummary | null;
+  gameOver: { winnerIdx: PlayerIdx } | null;
+  pendingQuestion: Question | null;
+  opponentQuestion: OpponentQuestionSummary | null;
+  draft: RedactedDraft | null;
+  opponentOnline: boolean | null;
   players: [RedactedPlayer, RedactedPlayer];
   /** stacks[playerIdx][lineIdx] */
   stacks: RedactedCard[][][];
-  /** Effective line totals per side from the server (includes face-down-value overrides, value modifiers). */
   lineValues: [number[], number[]];
-  /** Active player's compilable lines during check-compile (server-authoritative). */
-  compilableLines: number[];
-  /**
-   * Per-hand-card legal play targets keyed by instanceId. Only populated for
-   * cards in the viewer's own hand. The UI highlights drop zones from this;
-   * the server's `validatePlayCard` is the source of truth.
-   */
-  playOptions: Record<string, { faceUpLines: number[]; faceDownLines: number[] }>;
   log: LogEntry[];
 }
 
@@ -181,19 +178,15 @@ export interface LogEntry {
   readonly [k: string]: unknown;
 }
 
-export type PlayerAction =
-  | { kind: "play"; instanceId: string; lineIdx: LineIdx; faceDown: boolean }
-  | { kind: "refresh" };
+// ---------- Card filter (for prompt-target visualization) ----------
 
-// ---- socket events (server emits) ----
-export interface DraftPromptEv {
-  playerIdx: PlayerIdx;
-  pickCount: number;
-  remainingPool: ProtocolName[];
-}
-
-export interface DraftStartedEv {
-  youngestPlayerIdx: PlayerIdx;
-  order: { playerIdx: PlayerIdx; count: number }[];
-  pool: ProtocolName[];
-}
+export type CardFilter = {
+  side?: "self" | "opp" | "any";
+  faceUp?: boolean;
+  faceDown?: boolean;
+  covered?: boolean;
+  uncovered?: boolean;
+  inLines?: LineIdx[];
+  ownerIdx?: PlayerIdx;
+  instanceIds?: string[];
+};

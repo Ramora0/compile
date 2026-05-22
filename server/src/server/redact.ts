@@ -8,21 +8,18 @@
  * returns to opponent's hand, targeted reveals).
  */
 
-import { legalPlayLines } from "../engine/actions.js";
-import { compilableLines, LINE_INDICES, lineValue } from "../engine/field.js";
-import { PROTOCOLS } from "../shared/protocols.js";
+import { LINE_INDICES, lineValue } from "../engine/field.js";
+import { PROTOCOLS, type ProtocolName } from "../shared/protocols.js";
 import type { CardInstance, GameEvent, GameState, PlayerIdx } from "../engine/types.js";
+import type {
+  OpponentQuestionSummary,
+  Question,
+} from "../engine/question.js";
+import type { DraftPick } from "../engine/setup.js";
 
 const PROTOCOL_RANK: Map<string, number> = new Map(
   PROTOCOLS.map((p, i) => [p, i]),
 );
-
-export interface PlayOption {
-  /** Line indices this card can legally be played into face-up right now. */
-  faceUpLines: number[];
-  /** Line indices this card can legally be played into face-down right now. */
-  faceDownLines: number[];
-}
 
 export type ViewerId = PlayerIdx | "spectator";
 
@@ -48,18 +45,12 @@ export interface RedactedPlayer {
   protocols: { protocol: string; compiled: boolean }[];
 }
 
-/**
- * Lightweight description of a prompt awaiting the *other* player. Sent to
- * non-target viewers so the UI can describe what the opponent is being asked
- * to do ("discarding 2 cards", "choosing a card to delete") without leaking
- * the prompt's selectable card-ids, options, or revealed-hand snapshot.
- */
-export interface OpponentPromptSummary {
-  kind: "choose-card" | "choose-line" | "choose-option" | "discard-selection" | "play-from-hand" | "show-hand";
-  reason: string;
-  forPlayerIdx: PlayerIdx;
-  /** Only populated for discard-selection. */
-  count?: number;
+/** Public summary of the draft phase (whose turn, pool, picks so far). */
+export interface RedactedDraft {
+  picks: DraftPick[];
+  remainingPool: ProtocolName[];
+  whoseTurn: PlayerIdx | null;
+  pickCount: 1 | 2;
 }
 
 export interface RedactedState {
@@ -68,15 +59,31 @@ export interface RedactedState {
   activePlayerIdx: PlayerIdx;
   turnNumber: number;
   control: GameState["control"];
-  winnerIdx: PlayerIdx | null;
-  pendingPrompt: GameState["pendingPrompt"];
   /**
-   * Set when a pending prompt is awaiting the *other* viewer's input. The
-   * targeted viewer gets it through `pendingPrompt` with full detail; this
+   * Set once a winner is determined. Mirrors `state.winnerIdx`; carried
+   * separately so the client doesn't have to inspect winnerIdx separately.
+   */
+  gameOver: { winnerIdx: PlayerIdx } | null;
+  /**
+   * The single externally-visible question awaiting an answer. Full detail
+   * (options, etc.) is sent only to the addressee; opponents see
+   * `opponentQuestion` instead.
+   */
+  pendingQuestion: Question | null;
+  /**
+   * Set when a pending question is awaiting the *other* viewer's input. The
+   * targeted viewer gets it through `pendingQuestion` with full detail; this
    * is the safe-to-share summary for the non-target side so the UI can
    * describe what the opponent is doing.
    */
-  opponentPromptSummary: OpponentPromptSummary | null;
+  opponentQuestion: OpponentQuestionSummary | null;
+  /**
+   * Draft snapshot (whose turn, remaining pool, picks so far). Null once
+   * the in-game state has begun.
+   */
+  draft: RedactedDraft | null;
+  /** Opponent's connection presence; null = unknown / no opponent yet. */
+  opponentOnline: boolean | null;
   players: [RedactedPlayer, RedactedPlayer];
   stacks: RedactedCard[][][];
   /**
@@ -86,42 +93,76 @@ export interface RedactedState {
    */
   lineValues: [number[], number[]];
   /**
-   * Active player's compilable line indices during the check-compile phase
-   * (empty otherwise). The client renders the compile prompt from this list
-   * verbatim — it never recomputes which lines qualify.
-   */
-  compilableLines: number[];
-  /**
-   * Per-hand-card legal play targets for the viewer (keyed by instanceId).
-   * Empty for spectators (no hand) and for the opponent's hand cards (private).
-   * Computed via the engine's `validatePlayCard` so the client UI can highlight
-   * legal drop zones without reimplementing protocol-match, play-anywhere, or
-   * play-restriction logic.
-   */
-  playOptions: Record<string, PlayOption>;
-  /**
    * Log entries scrubbed per viewer: cardId / revealedCardId are nulled in
-   * events that would otherwise leak secret information (opponent discards,
-   * face-down plays/shifts, returns to opponent's hand, targeted reveals).
-   * The array length is preserved across viewers so animation queues stay
-   * in sync.
+   * events that would otherwise leak secret information. The array length is
+   * preserved across viewers so animation queues stay in sync.
    */
   log: GameState["log"];
 }
 
-export function redactState(state: GameState, viewer: ViewerId): RedactedState {
+export interface RedactInput {
+  /** In-game state. Null if the match is still in draft. */
+  state: GameState | null;
+  /** Match-level question (draft) overlay, when no Game exists yet. */
+  matchQuestion: Question | null;
+  draft: RedactedDraft | null;
+  opponentOnline: boolean | null;
+  /** Stable game/match id surfaced when there's no GameState yet. */
+  matchId: string;
+}
+
+const EMPTY_STACKS = [
+  [[], [], []],
+  [[], [], []],
+] as RedactedCard[][][];
+
+export function redactState(input: RedactInput, viewer: ViewerId): RedactedState {
+  const { state, matchQuestion, draft, opponentOnline, matchId } = input;
+
+  // Determine which (single) question to surface and how to redact it.
+  const rawQuestion = state?.pendingQuestion ?? matchQuestion ?? null;
+  const pendingQuestion =
+    rawQuestion && shouldSeeQuestion(rawQuestion.forPlayerIdx, viewer)
+      ? redactQuestionForViewer(rawQuestion, viewer)
+      : null;
+  const opponentQuestion =
+    rawQuestion && !shouldSeeQuestion(rawQuestion.forPlayerIdx, viewer) && viewer !== "spectator"
+      ? summarizeQuestion(rawQuestion)
+      : null;
+
+  if (!state) {
+    return {
+      id: matchId,
+      phase: "draft",
+      activePlayerIdx: 0,
+      turnNumber: 0,
+      control: "neutral",
+      gameOver: null,
+      pendingQuestion,
+      opponentQuestion,
+      draft,
+      opponentOnline,
+      players: [emptyPlayer(0), emptyPlayer(1)],
+      stacks: EMPTY_STACKS,
+      lineValues: [
+        [0, 0, 0],
+        [0, 0, 0],
+      ],
+      log: [],
+    };
+  }
+
   return {
     id: state.id,
     phase: state.phase,
     activePlayerIdx: state.activePlayerIdx,
     turnNumber: state.turnNumber,
     control: state.control,
-    winnerIdx: state.winnerIdx,
-    pendingPrompt:
-      state.pendingPrompt && shouldSeePrompt(state.pendingPrompt.forPlayerIdx, viewer)
-        ? state.pendingPrompt
-        : null,
-    opponentPromptSummary: summarizeOpponentPrompt(state.pendingPrompt, viewer),
+    gameOver: state.winnerIdx !== null ? { winnerIdx: state.winnerIdx } : null,
+    pendingQuestion,
+    opponentQuestion,
+    draft,
+    opponentOnline,
     players: [
       redactPlayer(state, 0, viewer),
       redactPlayer(state, 1, viewer),
@@ -135,12 +176,17 @@ export function redactState(state: GameState, viewer: ViewerId): RedactedState {
       LINE_INDICES.map((l) => lineValue(state, 0, l)),
       LINE_INDICES.map((l) => lineValue(state, 1, l)),
     ],
-    compilableLines:
-      state.phase === "check-compile" && state.winnerIdx === null
-        ? compilableLines(state, state.activePlayerIdx)
-        : [],
-    playOptions: computePlayOptions(state, viewer),
     log: state.log.map((ev) => redactLogEntry(ev, viewer)),
+  };
+}
+
+function emptyPlayer(idx: PlayerIdx): RedactedPlayer {
+  return {
+    id: `p${idx}`,
+    hand: { count: 0 },
+    deck: { count: 0 },
+    trash: [],
+    protocols: [],
   };
 }
 
@@ -157,24 +203,18 @@ function redactLogEntry(ev: GameEvent, viewer: ViewerId): GameEvent {
 
   switch (ev.type) {
     case "discard":
-      // Opponent's hand → their trash. Trash is public, but the act of
-      // discarding-by-name shouldn't broadcast which card just left the hand.
       if (viewer !== playerIdx) return { ...ev, cardId: null };
       return ev;
     case "play":
-      // Face-down plays land hidden on the field; only the owner knows the id.
       if (faceDown && viewer !== playerIdx) return { ...ev, cardId: null };
       return ev;
     case "shift":
-      // Face-down shifts stay hidden; cardId would leak the moved card.
       if (faceDown && viewer !== playerIdx) return { ...ev, cardId: null };
       return ev;
     case "return":
-      // Card lands in toPlayerIdx's hand (private). Hide from everyone else.
       if (viewer !== toPlayerIdx) return { ...ev, cardId: null };
       return ev;
     case "reveal":
-      // Targeted reveal: only ev.toPlayerIdx is entitled to see the identity.
       if (viewer !== toPlayerIdx) return { ...ev, revealedCardId: null };
       return ev;
     default:
@@ -215,8 +255,6 @@ function splitCardId(id: string | null): [string, number] {
 }
 
 function redactFieldCard(c: CardInstance, ownerIdx: PlayerIdx, viewer: ViewerId): RedactedCard {
-  // Face-up cards: identity public.
-  // Face-down cards: only the owner sees the cardId.
   if (!c.faceDown) {
     return { instanceId: c.instanceId, cardId: c.cardId, faceDown: false, ownerIdx };
   }
@@ -238,32 +276,27 @@ function publicCard(c: CardInstance): RedactedCard {
   };
 }
 
-function shouldSeePrompt(forPlayerIdx: PlayerIdx, viewer: ViewerId): boolean {
+function shouldSeeQuestion(forPlayerIdx: PlayerIdx, viewer: ViewerId): boolean {
   if (viewer === "spectator") return false;
   return viewer === forPlayerIdx;
 }
 
-function summarizeOpponentPrompt(
-  prompt: GameState["pendingPrompt"],
-  viewer: ViewerId,
-): OpponentPromptSummary | null {
-  if (!prompt) return null;
-  if (viewer === "spectator") return null;
-  if (viewer === prompt.forPlayerIdx) return null;
-  const base: OpponentPromptSummary = {
-    kind: prompt.kind,
-    reason: prompt.reason,
-    forPlayerIdx: prompt.forPlayerIdx,
+function summarizeQuestion(q: Question): OpponentQuestionSummary {
+  const out: OpponentQuestionSummary = {
+    kind: q.kind,
+    reason: q.reason,
+    forPlayerIdx: q.forPlayerIdx,
   };
-  if (prompt.kind === "discard-selection") base.count = prompt.count;
-  return base;
+  if (q.kind === "discard-selection" && q.picks) out.count = q.picks.min;
+  return out;
 }
 
-function computePlayOptions(state: GameState, viewer: ViewerId): Record<string, PlayOption> {
-  if (viewer === "spectator") return {};
-  const out: Record<string, PlayOption> = {};
-  for (const card of state.players[viewer].hand) {
-    out[card.instanceId] = legalPlayLines(state, viewer, card.instanceId);
-  }
-  return out;
+/**
+ * Redact a Question for the addressee. Currently a no-op (the addressee may
+ * see the full option list); reserved for future per-option filtering (e.g.
+ * a show-hand question carrying card identities the viewer is entitled to
+ * see only because they're the target).
+ */
+function redactQuestionForViewer(q: Question, _viewer: ViewerId): Question {
+  return q;
 }

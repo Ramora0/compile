@@ -3,6 +3,7 @@
 
 import type { CardValue, ProtocolName } from "../shared/protocols.js";
 import type { Prompt } from "./ops.js";
+import type { Question } from "./question.js";
 
 export type PlayerIdx = 0 | 1;
 export type LineIdx = 0 | 1 | 2;
@@ -140,6 +141,13 @@ export interface GameState {
   turnNumber: number;
   control: ControlState;
   pendingPrompt: Prompt | null;
+  /**
+   * The single externally-visible question the engine is currently asking.
+   * Populated by Game.run() at every block point; wraps a Prompt 1:1 when the
+   * block came from a generator, or is freshly built for phase-machine blocks
+   * (action / compile-line / control-rearrange). Cleared by Game.commit().
+   */
+  pendingQuestion: Question | null;
   /** Descriptors of in-flight effect frames. The runnable generators live outside GameState. */
   opStack: { source: string }[];
   overrides: { sourceInstanceId: string; override: RuleOverride }[];

@@ -1,13 +1,8 @@
 import { io, Socket } from "socket.io-client";
 import type {
-  DraftPromptEv,
-  DraftStartedEv,
-  PlayerAction,
+  Answer,
   PlayerIdx,
-  PromptResponse,
-  ProtocolName,
   RedactedState,
-  LineIdx,
 } from "./types.js";
 
 // VITE_SERVER_URL behaviour:
@@ -49,35 +44,13 @@ export const send = {
   createGame: (s: ClientSocket) => s.socket.emit("create_game"),
   joinGame: (s: ClientSocket, gameId: string) =>
     s.socket.emit("join_game", { gameId, playerId: s.playerId }),
-  draftPick: (s: ClientSocket, gameId: string, protocols: ProtocolName[]) =>
-    s.socket.emit("draft_pick", { gameId, protocols }),
-  submitAction: (s: ClientSocket, gameId: string, action: PlayerAction) =>
-    s.socket.emit("submit_action", { gameId, action }),
-  chooseCompileLine: (s: ClientSocket, gameId: string, lineIdx: LineIdx) =>
-    s.socket.emit("choose_compile_line", { gameId, lineIdx }),
-  rearrangeProtocols: (
-    s: ClientSocket,
-    gameId: string,
-    side: PlayerIdx,
-    newOrder: [0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2],
-  ) => s.socket.emit("rearrange_protocols", { gameId, side, newOrder }),
-  promptResponse: (s: ClientSocket, gameId: string, response: PromptResponse) =>
-    s.socket.emit("prompt_response", { gameId, response }),
+  answer: (s: ClientSocket, gameId: string, answer: Answer) =>
+    s.socket.emit("answer", { gameId, answer }),
 };
 
 export type ServerEvents = {
   game_created: (p: { gameId: string }) => void;
   joined: (p: { gameId: string; playerIdx: PlayerIdx }) => void;
-  draft_started: (p: DraftStartedEv) => void;
-  draft_prompt: (p: DraftPromptEv) => void;
-  draft_pick_made: (p: {
-    playerIdx: PlayerIdx;
-    protocols: ProtocolName[];
-    remainingPool: ProtocolName[];
-  }) => void;
-  draft_completed: (p: Record<string, never>) => void;
   state_update: (p: RedactedState) => void;
-  game_over: (p: { winnerIdx: PlayerIdx }) => void;
-  opponent_status: (p: { playerIdx: PlayerIdx; online: boolean }) => void;
   error: (p: { message: string }) => void;
 };

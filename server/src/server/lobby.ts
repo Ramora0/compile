@@ -6,12 +6,20 @@
  * Players join by gameId+playerId; sockets attach to their player slot. On
  * disconnect the slot persists for `disconnectGraceMs` so reconnection can
  * resume cleanly.
+ *
+ * The Match owns a per-match monotonic question-id source. The Game
+ * constructor is passed this generator so draft questions and engine
+ * questions share a single id space — important because the client's
+ * stale-answer protection compares ids without knowing about the seam.
  */
 
 import { randomUUID } from "node:crypto";
 import { Game } from "../engine/game.js";
 import { DRAFT_ORDER, createGame, type DraftPick } from "../engine/setup.js";
 import { PROTOCOLS, type ProtocolName } from "../shared/protocols.js";
+import { enumerateDraftOptions } from "../engine/enumerate.js";
+import type { Question } from "../engine/question.js";
+import type { RedactedDraft } from "./redact.js";
 
 export interface PlayerSlot {
   playerId: string;
@@ -34,16 +42,29 @@ export class Match {
   game: Game | null = null;
   /** Pending grace-period timers keyed by slot index. */
   private graceTimers: Map<0 | 1, NodeJS.Timeout> = new Map();
+  /** Online flag per slot; tracked independently of socketId for redacted state. */
+  online: [boolean, boolean] = [false, false];
+
+  private questionCounter = 0;
+  /** Cached draft question; rebuilt when step changes. */
+  private cachedDraftQuestion: Question | null = null;
+  private cachedDraftQuestionStep = -1;
 
   constructor(id?: string) {
     this.id = id ?? randomUUID();
   }
+
+  nextQuestionId = (): string => {
+    this.questionCounter++;
+    return `q${this.questionCounter}`;
+  };
 
   attach(playerId: string, socketId: string): 0 | 1 {
     for (let i = 0; i < 2; i++) {
       const idx = i as 0 | 1;
       if (this.players[idx]?.playerId === playerId) {
         this.players[idx]!.socketId = socketId;
+        this.online[idx] = true;
         this.cancelGrace(idx);
         return idx;
       }
@@ -52,6 +73,7 @@ export class Match {
       const idx = i as 0 | 1;
       if (!this.players[idx]) {
         this.players[idx] = { playerId, socketId };
+        this.online[idx] = true;
         return idx;
       }
     }
@@ -59,8 +81,13 @@ export class Match {
   }
 
   detach(socketId: string): void {
-    for (const slot of this.players) {
-      if (slot && slot.socketId === socketId) slot.socketId = null;
+    for (let i = 0; i < 2; i++) {
+      const idx = i as 0 | 1;
+      const slot = this.players[idx];
+      if (slot && slot.socketId === socketId) {
+        slot.socketId = null;
+        this.online[idx] = false;
+      }
     }
   }
 
@@ -80,6 +107,7 @@ export class Match {
       const slot = this.players[idx];
       if (!slot || slot.socketId !== socketId) continue;
       slot.socketId = null;
+      this.online[idx] = false;
       this.cancelGrace(idx);
       const timer = setTimeout(() => {
         this.graceTimers.delete(idx);
@@ -95,6 +123,7 @@ export class Match {
   /** Forget a slot entirely (called when grace expires). */
   releaseSlot(playerIdx: 0 | 1): void {
     this.players[playerIdx] = null;
+    this.online[playerIdx] = false;
     this.cancelGrace(playerIdx);
   }
 
@@ -115,6 +144,7 @@ export class Match {
       remainingPool: PROTOCOLS.filter((p) => p !== "hate" && p !== "apathy" && p !== "love"),
       step: 0,
     };
+    this.cachedDraftQuestionStep = -1;
     return true;
   }
 
@@ -123,6 +153,54 @@ export class Match {
     if (!this.draft) return null;
     const expected = DRAFT_ORDER[this.draft.step];
     return expected ? expected.playerIdx : null;
+  }
+
+  /** Snapshot of the draft for redaction; null if no draft is in flight. */
+  redactedDraft(): RedactedDraft | null {
+    if (!this.draft) return null;
+    const expected = DRAFT_ORDER[this.draft.step];
+    return {
+      picks: this.draft.picks.map((p) => ({ playerIdx: p.playerIdx, protocols: p.protocols.slice() })),
+      remainingPool: this.draft.remainingPool.slice(),
+      whoseTurn: expected ? expected.playerIdx : null,
+      pickCount: expected?.count ?? 1,
+    };
+  }
+
+  /**
+   * Build the current draft question. Rebuilds when the draft step changes;
+   * cached so a fresh questionId is only minted when the actual question
+   * changes (otherwise reconnects would invalidate the in-flight question).
+   */
+  currentDraftQuestion(): Question | null {
+    if (!this.draft) return null;
+    if (this.draft.step !== this.cachedDraftQuestionStep) {
+      const expected = DRAFT_ORDER[this.draft.step];
+      if (!expected) {
+        this.cachedDraftQuestion = null;
+      } else {
+        this.cachedDraftQuestion = {
+          kind: "draft-pick",
+          questionId: this.nextQuestionId(),
+          forPlayerIdx: expected.playerIdx,
+          reason: `draft-pick-${this.draft.step + 1}`,
+          pickCount: expected.count,
+          options: enumerateDraftOptions(this.draft.remainingPool, expected.count),
+        };
+      }
+      this.cachedDraftQuestionStep = this.draft.step;
+    }
+    return this.cachedDraftQuestion;
+  }
+
+  /**
+   * Single source of truth for "what question is outstanding right now?".
+   * During draft this is the draft-pick question; once `game` is live it's
+   * the engine's `state.pendingQuestion`.
+   */
+  currentQuestion(): Question | null {
+    if (this.game) return this.game.state.pendingQuestion;
+    return this.currentDraftQuestion();
   }
 
   /** Apply one draft pick. Throws if the pick is invalid. Returns true if draft completed. */
@@ -143,6 +221,8 @@ export class Match {
     }
     this.draft.picks.push({ playerIdx, protocols: protocols.slice() });
     this.draft.step++;
+    this.cachedDraftQuestion = null;
+    this.cachedDraftQuestionStep = -1;
     if (this.draft.step >= DRAFT_ORDER.length) {
       this.completeDraft();
       return true;
@@ -162,7 +242,7 @@ export class Match {
       playerIds: [this.players[0].playerId, this.players[1].playerId],
       draft: picks,
     });
-    this.game = new Game(state);
+    this.game = new Game(state, this.nextQuestionId);
     this.draft = null;
   }
 }

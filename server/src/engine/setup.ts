@@ -155,6 +155,7 @@ export function createGame(opts: NewGameOptions): GameState {
     turnNumber: 1,
     control: "neutral",
     pendingPrompt: null,
+    pendingQuestion: null,
     opStack: [],
     overrides: [],
     log: [{ t: 0, type: "game-created", gameId: opts.gameId }],

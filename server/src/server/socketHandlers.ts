@@ -1,30 +1,16 @@
 /**
- * Socket.IO event wiring. Translates client events into engine API calls and
- * pushes redacted state updates back. The bound socket carries the
- * authenticated playerId; matches are joined by gameId.
+ * Socket.IO event wiring. Single client-to-server channel ("answer") and a
+ * single server-to-client channel ("state_update"). The redacted state push
+ * carries everything the client needs to render — pending question, draft
+ * progress, opponent online flag, game-over winner — without side-channel
+ * events.
  */
 
 import type { Server, Socket } from "socket.io";
 import type { Lobby, Match } from "./lobby.js";
 import { redactState } from "./redact.js";
-import type { PlayerAction } from "../engine/actions.js";
-import type { PromptResponse } from "../engine/ops.js";
-import type { PlayerIdx, LineIdx } from "../engine/types.js";
-import type { ProtocolName } from "../shared/protocols.js";
-
-interface ClientToServer {
-  create_game: () => void;
-  join_game: (payload: { gameId: string; playerId: string }) => void;
-  draft_pick: (payload: { gameId: string; protocols: ProtocolName[] }) => void;
-  submit_action: (payload: { gameId: string; action: PlayerAction }) => void;
-  choose_compile_line: (payload: { gameId: string; lineIdx: LineIdx }) => void;
-  rearrange_protocols: (payload: {
-    gameId: string;
-    side: PlayerIdx;
-    newOrder: [0|1|2, 0|1|2, 0|1|2];
-  }) => void;
-  prompt_response: (payload: { gameId: string; response: PromptResponse }) => void;
-}
+import type { Answer, DraftPickPayload } from "../engine/question.js";
+import type { PlayerIdx } from "../engine/types.js";
 
 interface SocketData {
   playerId?: string;
@@ -63,104 +49,57 @@ export function attachHandlers(io: Server, lobby: Lobby, opts: AttachOptions = {
         const idx = match.attach(payload.playerId, socket.id);
         socket.join(roomName(match));
         socket.emit("joined", { gameId: match.id, playerIdx: idx });
-        // Tell the other seat their opponent is back / has joined.
-        socket.to(roomName(match)).emit("opponent_status", { playerIdx: idx, online: true });
-
-        if (match.startDraftIfReady()) {
-          io.to(roomName(match)).emit("draft_started", {
-            youngestPlayerIdx: 0,
-            order: [
-              { playerIdx: 0, count: 1 },
-              { playerIdx: 1, count: 2 },
-              { playerIdx: 0, count: 2 },
-              { playerIdx: 1, count: 1 },
-            ],
-            pool: match.draft?.remainingPool ?? [],
-          });
-          emitDraftPrompt(io, match);
-        } else if (match.game) {
-          // Reconnect into an in-flight game.
-          emitState(io, match);
-        }
+        // Once both seats have a player, kick off the draft.
+        match.startDraftIfReady();
+        emitState(io, match);
       });
     });
 
-    socket.on("draft_pick", (payload: { gameId: string; protocols: ProtocolName[] }) => {
+    socket.on("answer", (payload: { gameId: string; answer: Answer }) => {
       safe(() => {
         const match = requireMatch(lobby, payload.gameId);
         const playerIdx = requirePlayerIdx(match, sd.playerId);
-        const completed = match.applyDraftPick(playerIdx, payload.protocols);
-        if (completed) {
-          io.to(roomName(match)).emit("draft_completed", {});
-          emitState(io, match);
-          // After draft completion, run the engine into its initial blocked state.
-          driveAndEmit(io, match);
+
+        const q = match.currentQuestion();
+        if (!q) throw new Error("no pending question");
+        if (q.forPlayerIdx !== playerIdx) {
+          throw new Error(`question is for player ${q.forPlayerIdx}`);
+        }
+        if (payload.answer.questionId !== q.questionId) {
+          throw new Error(`stale answer: expected ${q.questionId}`);
+        }
+
+        if (q.kind === "draft-pick") {
+          // Draft answers are routed through the Match (no Game yet).
+          if (payload.answer.kind !== "single") {
+            throw new Error("draft-pick requires a single-answer");
+          }
+          const optionId = payload.answer.optionId;
+          const opt = q.options.find((o) => o.id === optionId);
+          if (!opt) throw new Error(`unknown optionId: ${optionId}`);
+          const draftPayload = opt.payload as DraftPickPayload;
+          match.applyDraftPick(playerIdx, draftPayload.protocols);
+          // If the draft just completed, drive the engine to its first block.
+          if (match.game) match.game.run();
         } else {
-          io.to(roomName(match)).emit("draft_pick_made", {
-            playerIdx,
-            protocols: payload.protocols,
-            remainingPool: match.draft?.remainingPool ?? [],
-          });
-          emitDraftPrompt(io, match);
+          if (!match.game) throw new Error("no active game");
+          match.game.commit(playerIdx, payload.answer);
         }
-      });
-    });
 
-    socket.on("submit_action", (payload: { gameId: string; action: PlayerAction }) => {
-      safe(() => {
-        const match = requireMatch(lobby, payload.gameId);
-        const game = requireGame(match);
-        const playerIdx = requirePlayerIdx(match, sd.playerId);
-        game.submitAction(playerIdx, payload.action);
-        driveAndEmit(io, match);
-      });
-    });
-
-    socket.on("choose_compile_line", (payload: { gameId: string; lineIdx: LineIdx }) => {
-      safe(() => {
-        const match = requireMatch(lobby, payload.gameId);
-        const game = requireGame(match);
-        // Only the active player picks the line; trusting the engine to validate.
-        game.chooseCompileLine(payload.lineIdx);
-        driveAndEmit(io, match);
-      });
-    });
-
-    socket.on(
-      "rearrange_protocols",
-      (payload: {
-        gameId: string;
-        side: PlayerIdx;
-        newOrder: [0|1|2, 0|1|2, 0|1|2];
-      }) => {
-        safe(() => {
-          const match = requireMatch(lobby, payload.gameId);
-          const game = requireGame(match);
-          game.submitRearrange(payload.side, payload.newOrder);
-          driveAndEmit(io, match);
-        });
-      },
-    );
-
-    socket.on("prompt_response", (payload: { gameId: string; response: PromptResponse }) => {
-      safe(() => {
-        const match = requireMatch(lobby, payload.gameId);
-        const game = requireGame(match);
-        game.resolvePrompt(payload.response);
-        driveAndEmit(io, match);
+        emitState(io, match);
       });
     });
 
     socket.on("disconnect", () => {
       for (const m of lobby.matchesForSocket(socket.id)) {
         const idx = m.scheduleDetach(socket.id, graceMs, (expiredIdx) => {
-          // Grace elapsed without a reconnect. If the game never started, free
-          // the slot so a fresh player can take it; otherwise leave the slot
-          // marked offline (the seat stays reserved by playerId).
           if (!m.game) m.releaseSlot(expiredIdx);
+          // Push state again on slot release so the opponent sees the offline flag.
+          emitState(io, m);
         });
         if (idx !== null) {
-          io.to(roomName(m)).emit("opponent_status", { playerIdx: idx, online: false });
+          // Opponent will see online = false via the redacted state push.
+          emitState(io, m);
         }
       }
     });
@@ -177,11 +116,6 @@ function requireMatch(lobby: Lobby, gameId: string): Match {
   return m;
 }
 
-function requireGame(match: Match) {
-  if (!match.game) throw new Error("game has not started yet");
-  return match.game;
-}
-
 function requirePlayerIdx(match: Match, playerId: string | undefined): PlayerIdx {
   if (!playerId) throw new Error("not authenticated — join_game first");
   for (let i = 0; i < 2; i++) {
@@ -190,34 +124,21 @@ function requirePlayerIdx(match: Match, playerId: string | undefined): PlayerIdx
   throw new Error("not in this match");
 }
 
-function emitDraftPrompt(io: Server, match: Match): void {
-  if (!match.draft) return;
-  const next = match.draftWhoseTurn();
-  if (next === null) return;
-  io.to(roomName(match)).emit("draft_prompt", {
-    playerIdx: next,
-    pickCount: match.draft.picks.length, // 0..3
-    remainingPool: match.draft.remainingPool,
-  });
-}
-
 function emitState(io: Server, match: Match): void {
-  if (!match.game) return;
   for (let i = 0; i < 2; i++) {
     const slot = match.players[i];
     if (!slot?.socketId) continue;
-    const view = redactState(match.game.state, i as PlayerIdx);
+    const viewer = i as PlayerIdx;
+    const view = redactState(
+      {
+        state: match.game?.state ?? null,
+        matchQuestion: match.game ? null : match.currentDraftQuestion(),
+        draft: match.redactedDraft(),
+        opponentOnline: match.online[(1 - i) as PlayerIdx],
+        matchId: match.id,
+      },
+      viewer,
+    );
     io.to(slot.socketId).emit("state_update", view);
   }
 }
-
-function driveAndEmit(io: Server, match: Match): void {
-  if (!match.game) return;
-  const blocked = match.game.run();
-  emitState(io, match);
-  if (blocked.kind === "game-over") {
-    io.to(roomName(match)).emit("game_over", { winnerIdx: blocked.winnerIdx });
-  }
-}
-
-export type { ClientToServer };

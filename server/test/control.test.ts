@@ -6,6 +6,11 @@ import {
   rearrangeProtocols,
 } from "../src/engine/control.js";
 import { Game } from "../src/engine/game.js";
+import {
+  commitCompile,
+  commitRearrange,
+  commitRefresh,
+} from "./helpers/answers.js";
 
 describe("rearrangeProtocols", () => {
   it("permutes the slots without moving the cards in their lines", () => {
@@ -28,20 +33,23 @@ describe("rearrangeProtocols", () => {
 });
 
 describe("Control component lifecycle", () => {
-  it("Game.submitRearrange consumes the Control component", () => {
+  it("rearrange answer consumes the Control component", () => {
     const g = newGame();
     g.control = 0; // active player holds it
+    g.phase = "action";
     const game = new Game(g);
     expect(activeHoldsControl(g)).toBe(true);
-    game.submitRearrange(0, [1, 0, 2]);
+    commitRearrange(game, 0, { side: 0, newOrder: [1, 0, 2] });
     expect(g.control).toBe("neutral");
   });
 
-  it("submitRearrange throws when the active player does not hold Control", () => {
+  it("rearrange question is only emitted when the active player holds Control", () => {
     const g = newGame();
     g.control = 1; // opponent holds it
+    g.phase = "action";
     const game = new Game(g);
-    expect(() => game.submitRearrange(0, [1, 0, 2])).toThrow(/only the Control holder/);
+    game.run();
+    expect(g.pendingQuestion?.kind).toBe("action"); // no rearrange offered
   });
 
   it("consumeControl is a no-op when control is already neutral", () => {
@@ -57,7 +65,9 @@ describe("Control component lifecycle", () => {
     g.control = 0;
     g.phase = "action";
     const game = new Game(g);
-    game.submitAction(0, { kind: "refresh" });
+    // First answer the offered rearrange question with skip, then refresh.
+    commitRearrange(game, 0, "skip");
+    commitRefresh(game, 0);
     expect(g.control).toBe("neutral");
   });
 
@@ -66,7 +76,7 @@ describe("Control component lifecycle", () => {
     g.control = 1; // opponent holds it
     g.phase = "action";
     const game = new Game(g);
-    game.submitAction(0, { kind: "refresh" });
+    commitRefresh(game, 0);
     expect(g.control).toBe(1);
   });
 
@@ -74,12 +84,14 @@ describe("Control component lifecycle", () => {
     const g = newGame();
     g.control = 0;
     g.phase = "check-compile";
-    // chooseCompileLine trusts its caller (it's gated by the Check Compile phase,
-    // which only emits awaiting-compile-choice for compilable lines). We're
-    // exercising the Control-reset side effect, not the compile mechanics, so an
-    // empty line is fine here.
+    // The compile-line question is only offered when compilable lines exist.
+    // Force a compilable state, then skip the offered rearrange, then choose
+    // the line.
+    g.stacks[0][0].cards.push({ instanceId: "fake-10", cardId: "spirit-5", faceDown: false, ownerIdx: 0 });
+    g.stacks[0][0].cards.push({ instanceId: "fake-11", cardId: "spirit-5", faceDown: false, ownerIdx: 0 });
     const game = new Game(g);
-    game.chooseCompileLine(0);
+    commitRearrange(game, 0, "skip");
+    commitCompile(game, 0, 0);
     expect(g.control).toBe("neutral");
   });
 });
