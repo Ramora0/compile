@@ -259,6 +259,12 @@ function SessionView({
     return <Connecting />;
   }
 
+  // No draft and no game yet → we're the creator waiting for an opponent to
+  // join. Show the gameId so it can be shared.
+  if (!state.draft && state.opponentOnline === null) {
+    return <WaitingForOpponentScreen gameId={gameId} />;
+  }
+
   // Active draft: route into the draft picker / opponent-drafting screen.
   if (state.draft) {
     const q = state.pendingQuestion;
@@ -297,6 +303,57 @@ function Connecting() {
         <div className="cp-banner">
           <span className="mono" style={{ fontSize: 11, letterSpacing: "0.18em" }}>
             CONNECTING…
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WaitingForOpponentScreen({ gameId }: { gameId: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = () => {
+    navigator.clipboard?.writeText(gameId).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => {},
+    );
+  };
+  return (
+    <div className="cp-screen">
+      <div className="cp-screen-inner">
+        <h1 className="cp-title">COMPILE</h1>
+        <p className="cp-subtitle">Share this code with your opponent to start the game.</p>
+        <div
+          className="cp-banner"
+          style={{ flexDirection: "column", alignItems: "flex-start", gap: 12 }}
+        >
+          <span
+            className="mono"
+            style={{ fontSize: 10, letterSpacing: "0.18em", opacity: 0.6 }}
+          >
+            GAME CODE
+          </span>
+          <span
+            className="mono"
+            style={{
+              fontSize: 16,
+              letterSpacing: "0.08em",
+              wordBreak: "break-all",
+              userSelect: "all",
+            }}
+          >
+            {gameId}
+          </span>
+          <button className="cp-btn" onClick={onCopy}>
+            {copied ? "COPIED" : "COPY CODE"}
+          </button>
+        </div>
+        <div className="cp-banner">
+          <span className="mono" style={{ fontSize: 11, letterSpacing: "0.18em" }}>
+            WAITING FOR OPPONENT…
           </span>
         </div>
       </div>

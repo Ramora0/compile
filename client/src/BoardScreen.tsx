@@ -2424,9 +2424,9 @@ function CompilePickerOverlay({
 
 /**
  * Modal that surfaces the control-rearrange question. Six perm buttons + skip.
- * Only fires when the active player holds Control; the engine emits this just
- * before the action-phase question or compile-line question, so its visibility
- * gates the rest of the turn.
+ * Only fires when the active player holds Control and is spending it — i.e.
+ * just after they choose Refresh, or before a forced Compile (rules.md:51/:57).
+ * Playing a card does not offer it.
  */
 function RearrangeOverlay({
   client,
@@ -2466,7 +2466,7 @@ function RearrangeOverlay({
         className="mono"
         style={{ fontSize: 11, letterSpacing: "0.16em", color: "var(--ink-dim)" }}
       >
-        Reorder your three protocols before this {question.reason.includes("compile") ? "compile" : "action"}. Skip to leave them as-is.
+        Reorder your three protocols before this {question.reason.includes("compile") ? "compile" : "refresh"}. Skip to leave them as-is.
       </p>
       <div className="row gap-3" style={{ flexWrap: "wrap" }}>
         {perms.map((p) => (

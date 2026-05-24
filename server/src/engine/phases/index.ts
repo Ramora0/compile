@@ -14,7 +14,6 @@ export type StepResult =
   | { kind: "awaiting-action"; playerIdx: PlayerIdx }
   | { kind: "awaiting-prompt"; playerIdx: PlayerIdx }
   | { kind: "awaiting-compile-choice"; playerIdx: PlayerIdx; lines: number[] }
-  | { kind: "awaiting-control-rearrange"; playerIdx: PlayerIdx }
   | { kind: "game-over"; winnerIdx: PlayerIdx };
 
 export const PHASE_ORDER: readonly Phase[] = [

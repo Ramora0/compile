@@ -129,12 +129,17 @@ function emitState(io: Server, match: Match): void {
     const slot = match.players[i];
     if (!slot?.socketId) continue;
     const viewer = i as PlayerIdx;
+    const oppIdx = (1 - i) as PlayerIdx;
+    // null = slot has never been filled (no opponent yet). false = previously
+    // joined but currently disconnected. Lets the client distinguish "share
+    // your code" from "opponent dropped".
+    const opponentOnline = match.players[oppIdx] ? match.online[oppIdx] : null;
     const view = redactState(
       {
         state: match.game?.state ?? null,
         matchQuestion: match.game ? null : match.currentDraftQuestion(),
         draft: match.redactedDraft(),
-        opponentOnline: match.online[(1 - i) as PlayerIdx],
+        opponentOnline,
         matchId: match.id,
       },
       viewer,

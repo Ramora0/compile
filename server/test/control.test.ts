@@ -8,6 +8,7 @@ import {
 import { Game } from "../src/engine/game.js";
 import {
   commitCompile,
+  commitPlay,
   commitRearrange,
   commitRefresh,
 } from "./helpers/answers.js";
@@ -39,8 +40,34 @@ describe("Control component lifecycle", () => {
     g.phase = "action";
     const game = new Game(g);
     expect(activeHoldsControl(g)).toBe(true);
+    // Rearrange is only offered once the player commits to Refreshing.
+    commitRefresh(game, 0);
+    expect(g.pendingQuestion?.kind).toBe("control-rearrange");
     commitRearrange(game, 0, { side: 0, newOrder: [1, 0, 2] });
     expect(g.control).toBe("neutral");
+  });
+
+  it("does not offer the rearrange before the action choice", () => {
+    const g = newGame();
+    g.control = 0; // active player holds it
+    g.phase = "action";
+    const game = new Game(g);
+    game.run();
+    // The first thing offered is the action choice, NOT a rearrange — Control
+    // is only spent on Refresh/Compile, not before every action (rules.md:51).
+    expect(g.pendingQuestion?.kind).toBe("action");
+  });
+
+  it("playing a card does not offer the rearrange and keeps Control", () => {
+    const g = newGame();
+    g.control = 0; // active player holds it
+    g.phase = "action";
+    const card = g.players[0].hand[0]!;
+    const game = new Game(g);
+    // Face-down play into any line — never offers a rearrange.
+    commitPlay(game, 0, { instanceId: card.instanceId, lineIdx: 0, faceDown: true });
+    // Control survives a card play; it only spends on Refresh/Compile.
+    expect(g.control).toBe(0);
   });
 
   it("rearrange question is only emitted when the active player holds Control", () => {
@@ -65,9 +92,10 @@ describe("Control component lifecycle", () => {
     g.control = 0;
     g.phase = "action";
     const game = new Game(g);
-    // First answer the offered rearrange question with skip, then refresh.
-    commitRearrange(game, 0, "skip");
+    // Choose Refresh, which offers the rearrange; skipping it still resolves
+    // the Refresh and consumes Control.
     commitRefresh(game, 0);
+    commitRearrange(game, 0, "skip");
     expect(g.control).toBe("neutral");
   });
 

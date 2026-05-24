@@ -90,11 +90,11 @@ export class Game {
         return { kind: "awaiting-answer" };
       }
       if (res.kind === "awaiting-action") {
-        if (this.shouldOfferRearrange(res.playerIdx)) {
-          this.setRearrangeQuestion(res.playerIdx, "before-action");
-        } else {
-          this.setActionQuestion(res.playerIdx);
-        }
+        // Control's rearrange is NOT offered here. Per rules.md:51/:57 it is
+        // only available when the player actually takes the Refresh or Compile
+        // action — never before a card play. The Refresh case is interposed in
+        // applyActionPayload, once the player has committed to Refreshing.
+        this.setActionQuestion(res.playerIdx);
         return { kind: "awaiting-answer" };
       }
       if (res.kind === "awaiting-compile-choice") {
@@ -103,11 +103,6 @@ export class Game {
         } else {
           this.setCompileQuestion(res.playerIdx);
         }
-        return { kind: "awaiting-answer" };
-      }
-      if (res.kind === "awaiting-control-rearrange") {
-        // Phase-machine flagged rearrange explicitly — honour it.
-        this.setRearrangeQuestion(res.playerIdx, "before-action");
         return { kind: "awaiting-answer" };
       }
     }
@@ -240,11 +235,11 @@ export class Game {
     };
   }
 
-  private rearrangeContext: "before-action" | "before-compile" | null = null;
+  private rearrangeContext: "before-refresh" | "before-compile" | null = null;
 
   private setRearrangeQuestion(
     playerIdx: PlayerIdx,
-    context: "before-action" | "before-compile",
+    context: "before-refresh" | "before-compile",
   ): void {
     this.rearrangeAskedThisPhase = true;
     this.rearrangeContext = context;
@@ -256,7 +251,7 @@ export class Game {
       kind: "control-rearrange",
       questionId: this.nextQuestionId(),
       forPlayerIdx: playerIdx,
-      reason: context === "before-compile" ? "rearrange-before-compile" : "rearrange-before-action",
+      reason: context === "before-compile" ? "rearrange-before-compile" : "rearrange-before-refresh",
       options: enumerateRearrangeOptions(playerIdx),
     };
   }
@@ -337,8 +332,17 @@ export class Game {
 
   private applyActionPayload(playerIdx: PlayerIdx, payload: ActionPayload): EngineBlocked {
     if (payload.kind === "refresh") {
+      // rules.md:51 — Refresh is one of the two moments Control may be spent.
+      // If the player holds Control, interpose the rearrange now (after they've
+      // committed to Refreshing, before the Refresh resolves and consumes it).
+      // applyRearrangePayload carries out the deferred Refresh once answered.
+      if (this.shouldOfferRearrange(playerIdx)) {
+        this.setRearrangeQuestion(playerIdx, "before-refresh");
+        return { kind: "awaiting-answer" };
+      }
       applyAction(this.runtime, this.state, playerIdx, { kind: "refresh" });
     } else {
+      // Playing a card never spends Control (rules.md:51/:57): leave it intact.
       applyAction(this.runtime, this.state, playerIdx, {
         kind: "play",
         instanceId: payload.instanceId,
@@ -374,10 +378,17 @@ export class Game {
       consumeControl(this.state);
       recomputeOverrides(this.state);
     }
+    const context = this.rearrangeContext;
     this.rearrangeContext = null;
-    // rearrangeAskedThisPhase stays true so run() doesn't re-emit the same
-    // rearrange question; it'll surface the next phase-appropriate question
-    // (compile-line or action).
+    // When the rearrange was interposed before a Refresh, carry out the Refresh
+    // now. If the player skipped, Control is still held and the Refresh
+    // resolution (refreshGenerator) consumes it; if they rearranged, it was
+    // already consumed above.
+    if (context === "before-refresh") {
+      applyAction(this.runtime, this.state, playerIdx, { kind: "refresh" });
+    }
+    // For "before-compile", rearrangeAskedThisPhase stays true so run() doesn't
+    // re-emit the rearrange question; it'll surface the compile-line question.
     return this.run();
   }
 
