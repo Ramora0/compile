@@ -465,6 +465,41 @@ describe("Hate 4 — lowest covered considers both sides", () => {
   });
 });
 
+describe("Plague 3 — flips only uncovered face-up cards", () => {
+  beforeEach(() => registerOnly([plagueCards]));
+  afterEach(() => clearRegistry());
+
+  it("flips every other UNCOVERED face-up card, sparing covered and face-down cards", () => {
+    const g = newGame();
+    // Resolver: plague-3 face-up on its own line (excluded from its own effect).
+    const plague3 = placeCard(g, 0, 0, "plague-3");
+    // Opponent line: a covered face-up card beneath an uncovered face-up card.
+    const oppCovered = placeCard(g, 1, 1, "plague-0"); // face-up, becomes covered
+    const oppUncovered = placeCard(g, 1, 1, "plague-1"); // face-up, uncovered
+    // Self line: an uncovered face-up card, plus a face-down card it covers.
+    const selfFaceDown = placeCard(g, 0, 2, "plague-5", true); // face-down, covered
+    const selfUncovered = placeCard(g, 0, 2, "plague-2"); // face-up, uncovered
+
+    const game = new Game(g);
+    const def = plagueCards.find((c) => c.value === 3)!;
+    game.runtime.push("test:plague-3", def.middle!(makeCtx(g, plague3.instanceId, 0)));
+    game.runtime.pump();
+
+    const facing = (id: string) =>
+      [...g.stacks[0].flatMap((s) => s.cards), ...g.stacks[1].flatMap((s) => s.cards)].find(
+        (c) => c.instanceId === id,
+      )!.faceDown;
+
+    // Uncovered face-up cards on both sides flipped to face-down.
+    expect(facing(oppUncovered.instanceId)).toBe(true);
+    expect(facing(selfUncovered.instanceId)).toBe(true);
+    // Covered face-up card untouched; face-down card untouched; resolver untouched.
+    expect(facing(oppCovered.instanceId)).toBe(false);
+    expect(facing(selfFaceDown.instanceId)).toBe(true);
+    expect(facing(plague3.instanceId)).toBe(false);
+  });
+});
+
 describe("Plague 4 — silent skip when opponent has no face-down cards", () => {
   beforeEach(() => registerOnly([plagueCards]));
   afterEach(() => clearRegistry());

@@ -140,6 +140,39 @@ describe("EffectRuntime — basic Ops", () => {
     expect(g.players[0].trash[0]?.instanceId).toBe(c.instanceId);
   });
 
+  it("delete flips a face-down card face-up so it can't be drawn face-down later", () => {
+    const g = newGame();
+    // Force a reshuffle on the next draw: deck empty, trash will hold only the
+    // deleted card. A face-down card on the field is deleted (→ trash), the
+    // trash is reshuffled into the deck, then drawn back into the hand.
+    g.players[0].deck = [];
+    g.players[0].trash = [];
+    g.players[0].hand = [];
+    const c = placeCard(g, 0, 1, "spirit-2", true);
+    expect(c.faceDown).toBe(true);
+    function* effect(): Generator<Op, void, OpResult> {
+      yield { kind: "delete", instanceId: c.instanceId };
+      yield { kind: "draw", playerIdx: 0, count: 1 };
+    }
+    runner(g, effect());
+    const drawn = g.players[0].hand.find((h) => h.instanceId === c.instanceId);
+    expect(drawn).toBeDefined();
+    expect(drawn?.faceDown).toBe(false);
+  });
+
+  it("return flips a face-down field card face-up when it lands in the hand", () => {
+    const g = newGame();
+    const c = placeCard(g, 1, 2, "fire-1", true);
+    expect(c.faceDown).toBe(true);
+    function* effect(): Generator<Op, void, OpResult> {
+      yield { kind: "return", instanceId: c.instanceId };
+    }
+    runner(g, effect());
+    const returned = g.players[1].hand.find((h) => h.instanceId === c.instanceId);
+    expect(returned).toBeDefined();
+    expect(returned?.faceDown).toBe(false);
+  });
+
   it("flip toggles faceDown on a field card", () => {
     const g = newGame();
     const c = placeCard(g, 0, 1, "spirit-2", true);

@@ -294,6 +294,10 @@ export class EffectRuntime {
       faceDown: removed.removed.faceDown,
       cause: op.cause ?? "effect",
     });
+    // Cards are only ever face-down in the play area. Once this card lands in
+    // the trash it may be reshuffled into the deck and drawn, so reset it
+    // face-up here (after the log records its on-field orientation).
+    removed.removed.faceDown = false;
     recomputeOverrides(this.state);
     this.fireReactive("after-delete", this.state.activePlayerIdx);
     // If the removal newly uncovered a card, its middle text resolves on uncover.
@@ -579,6 +583,9 @@ export class EffectRuntime {
       toPlayerIdx: targetIdx,
       faceDown: removed.removed.faceDown,
     });
+    // Cards are only ever face-down in the play area; a card returned to a hand
+    // must be face-up (reset after the log records its on-field orientation).
+    removed.removed.faceDown = false;
     recomputeOverrides(this.state);
     this.fireReactive("after-return", this.state.activePlayerIdx);
     if (removed.nowUncovered && !removed.nowUncovered.faceDown) {

@@ -73,8 +73,12 @@ const plague3: CardDef = {
   value: 3,
   top: null,
   middle: function* (ctx) {
+    // "each other face-up card" — covered cards aren't affected (rules.md:96:
+    // only "covered"/"all" wording reaches covered cards), so restrict to the
+    // uncovered card at the top of each stack.
     yield* h.flipAllMatching(ctx, {
       faceUp: true,
+      uncovered: true,
       excludeInstanceId: ctx.thisInstanceId,
     });
   },

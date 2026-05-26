@@ -54,7 +54,7 @@ Server env vars (defaults applied if unset): `PORT=3000`, `CORS_ORIGIN=*`, `DISC
 1. **Phase machine** (`engine/phases/`) advances Phase enum (`draft → start → check-control → check-compile → action → check-cache → end`). On entering certain phases it fires Start/End triggers and Check Compile.
 2. **Effect runtime** (`engine/runtime.ts`) pumps generator-based card effects. Each card-effect generator yields `Op` values (`draw`, `discard`, `delete`, `flip`, `shift`, `play`, `return`, `reveal`, `transfer-ownership`, `prompt`); the runtime applies the Op, fires any replacement/reactive triggers it causes, and resumes the generator with the result.
 
-`Game.run()` returns an `EngineBlocked` discriminant (`awaiting-action`, `awaiting-prompt`, `awaiting-compile-choice`, `awaiting-control-rearrange`, `game-over`). Callers (the socket layer or tests) feed input back in via `applyAction`, `respondToPrompt`, `chooseCompileLine`, etc.
+`Game.run()` returns an `EngineBlocked` discriminant — either `awaiting-answer` or `game-over`. When it blocks on `awaiting-answer` it populates `state.pendingQuestion` with the question to surface to the addressee; the specific blocking reason is the question's `kind` (`action`, `prompt`, `compile-line`, `control-rearrange`, …). Callers (the socket layer or tests) feed input back in via the single `commit(playerIdx, answer)` entry point.
 
 The Op pump and a LIFO effect stack give the "active text interrupts other text, last-in-first-out" semantics from `rules.md` for free: nested triggers push new generator frames onto the runtime stack.
 

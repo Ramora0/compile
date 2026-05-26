@@ -22,11 +22,12 @@ import {
   answerForDiscard,
   answerForPlay,
   answerForPlayFromHand,
-  answerForRearrange,
   answerForRefresh,
   compileLinesFromQuestion,
   playTargetsFromQuestion,
 } from "./answers.js";
+import { useProtocolReorder, type ReorderController } from "./useProtocolReorder.js";
+import type { ReorderOrder, ReorderSession } from "./protocolReorder.js";
 import { Stage } from "./ui/Stage.js";
 import { Card } from "./ui/Card.js";
 import { Sigil } from "./ui/Sigil.js";
@@ -245,12 +246,15 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
     return compileLinesFromQuestion(state.pendingQuestion);
   }, [state.pendingQuestion, isMyTurn, myIdx]);
 
-  const rearrangeQuestion =
-    state.pendingQuestion &&
-    state.pendingQuestion.kind === "control-rearrange" &&
-    state.pendingQuestion.forPlayerIdx === myIdx
-      ? state.pendingQuestion
-      : null;
+  // Drag-to-reorder protocols (Control rearrange, Water 2, Psychic 2, Spirit 4).
+  // One controller drives all four flows; see `useProtocolReorder`.
+  const reorder = useProtocolReorder({
+    pendingQuestion: state.pendingQuestion,
+    myIdx,
+    client,
+    gameId,
+    onNotify,
+  });
 
   const draggedCard = dragInstanceId
     ? youHand.find((c) => c.instanceId === dragInstanceId) ?? null
@@ -260,8 +264,12 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
   // ── question-driven selection ──────────────────────────────────
   // Only surface targets when the question is for me; otherwise the
   // opponent's question would highlight cards on my screen with no way to act.
+  // Questions the reorder controller owns (rearrange/swap) are driven by the
+  // board drag UI instead of the default banner/target highlighting.
   const pendingPrompt =
-    state.pendingQuestion && state.pendingQuestion.forPlayerIdx === myIdx
+    state.pendingQuestion &&
+    state.pendingQuestion.forPlayerIdx === myIdx &&
+    !reorder.ownsPending
       ? state.pendingQuestion
       : null;
 
@@ -419,6 +427,12 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
         pendingLine={pendingLine}
         onCardPick={handleCardPick}
         onLinePick={handleLinePick}
+        reorderSide={reorder.session ? reorder.session.targetSide : null}
+        reorderOrder={reorder.order}
+        reorderDragIdx={reorder.dragIdx}
+        onReorderDragStart={reorder.onDragStart}
+        onReorderDragEnd={reorder.onDragEnd}
+        onReorderDrop={reorder.onDrop}
       />
 
       <RightRail
@@ -462,13 +476,8 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
           />
         )}
 
-      {rearrangeQuestion && (
-        <RearrangeOverlay
-          client={client}
-          gameId={gameId}
-          question={rearrangeQuestion}
-          onNotify={onNotify}
-        />
+      {reorder.session && (
+        <ReorderBar controller={reorder} session={reorder.session} />
       )}
 
       {pendingPrompt && !showHandPrompt && pendingPromptIsBanner(pendingPrompt) && (
@@ -656,6 +665,12 @@ function LanesGrid({
   pendingLine,
   onCardPick,
   onLinePick,
+  reorderSide,
+  reorderOrder,
+  reorderDragIdx,
+  onReorderDragStart,
+  onReorderDragEnd,
+  onReorderDrop,
 }: {
   state: RedactedState;
   youIdx: PlayerIdx;
@@ -670,6 +685,13 @@ function LanesGrid({
   pendingLine: LineIdx | null;
   onCardPick: (instanceId: string) => void;
   onLinePick: (lineIdx: LineIdx) => void;
+  /** Absolute player whose protocol headers are draggable now, or null. */
+  reorderSide: PlayerIdx | null;
+  reorderOrder: ReorderOrder;
+  reorderDragIdx: number | null;
+  onReorderDragStart: (displayIdx: number) => void;
+  onReorderDragEnd: () => void;
+  onReorderDrop: (displayIdx: number) => void;
 }) {
   return (
     <div
@@ -703,6 +725,12 @@ function LanesGrid({
             isPending={pendingLine === lineIdx}
             onCardPick={onCardPick}
             onLinePick={onLinePick}
+            reorderSide={reorderSide}
+            reorderSlotIdx={reorderOrder[lineIdx]}
+            reorderDragIdx={reorderDragIdx}
+            onReorderDragStart={onReorderDragStart}
+            onReorderDragEnd={onReorderDragEnd}
+            onReorderDrop={onReorderDrop}
           />
         );
       })}
@@ -725,6 +753,12 @@ function Lane({
   isPending,
   onCardPick,
   onLinePick,
+  reorderSide,
+  reorderSlotIdx,
+  reorderDragIdx,
+  onReorderDragStart,
+  onReorderDragEnd,
+  onReorderDrop,
 }: {
   state: RedactedState;
   youIdx: PlayerIdx;
@@ -740,10 +774,24 @@ function Lane({
   isPending: boolean;
   onCardPick: (instanceId: string) => void;
   onLinePick: (lineIdx: LineIdx) => void;
+  /** Absolute player whose protocol headers are draggable now, or null. */
+  reorderSide: PlayerIdx | null;
+  /** Original protocol-slot index previewed at this display line (for the reordered side). */
+  reorderSlotIdx: 0 | 1 | 2;
+  reorderDragIdx: number | null;
+  onReorderDragStart: (displayIdx: number) => void;
+  onReorderDragEnd: () => void;
+  onReorderDrop: (displayIdx: number) => void;
 }) {
   const lineIsTarget = targets.lines.has(lineIdx);
-  const youSlot = state.players[youIdx].protocols[lineIdx];
-  const oppSlot = state.players[oppIdx].protocols[lineIdx];
+  // While reordering, the cards in each line stay put — only the protocol header
+  // (name + compiled flag) of the *targeted* side moves. Preview that by reading
+  // that side's slot through the reordered index; everything else stays
+  // line-anchored. `reorderSide` is absolute, so map it to you/opp.
+  const reorderYou = reorderSide === youIdx;
+  const reorderOpp = reorderSide === oppIdx;
+  const youSlot = state.players[youIdx].protocols[reorderYou ? reorderSlotIdx : lineIdx];
+  const oppSlot = state.players[oppIdx].protocols[reorderOpp ? reorderSlotIdx : lineIdx];
   const youStack = state.stacks[youIdx]?.[lineIdx] ?? [];
   const oppStack = state.stacks[oppIdx]?.[lineIdx] ?? [];
 
@@ -775,6 +823,10 @@ function Lane({
     showFaceDownZone && (dragOptions?.faceDownLines.includes(lineIdx) ?? false);
   const laneProtocolLabel = youSlot?.protocol?.toUpperCase() ?? "—";
   const draggedProtocolLabel = draggedProtocol?.toUpperCase() ?? "?";
+
+  // Any other header may receive a drop while a reorder drag is in flight.
+  const isReorderDropTarget =
+    reorderSide !== null && reorderDragIdx !== null && reorderDragIdx !== lineIdx;
 
   return (
     <div
@@ -856,15 +908,26 @@ function Lane({
           background: "var(--void-2)",
         }}
       >
-        <SlimLaneHeader
-          side="opp"
-          el={oppEl}
-          value={oppCompile}
-          compiled={oppCompiled}
-          playerIdx={oppIdx}
-          lineIdx={lineIdx}
-          centered
-        />
+        <ReorderHandle
+          enabled={reorderOpp}
+          displayIdx={lineIdx}
+          dragging={reorderDragIdx === lineIdx}
+          isDropTarget={isReorderDropTarget}
+          onDragStart={onReorderDragStart}
+          onDragEnd={onReorderDragEnd}
+          onDrop={onReorderDrop}
+        >
+          <SlimLaneHeader
+            side="opp"
+            el={oppEl}
+            value={oppCompile}
+            compiled={oppCompiled}
+            playerIdx={oppIdx}
+            lineIdx={lineIdx}
+            centered
+            grip={reorderOpp}
+          />
+        </ReorderHandle>
 
         <div
           style={{
@@ -898,15 +961,26 @@ function Lane({
           </span>
         </div>
 
-        <SlimLaneHeader
-          side="you"
-          el={youEl}
-          value={youCompile}
-          compiled={youCompiled}
-          playerIdx={youIdx}
-          lineIdx={lineIdx}
-          centered
-        />
+        <ReorderHandle
+          enabled={reorderYou}
+          displayIdx={lineIdx}
+          dragging={reorderDragIdx === lineIdx}
+          isDropTarget={isReorderDropTarget}
+          onDragStart={onReorderDragStart}
+          onDragEnd={onReorderDragEnd}
+          onDrop={onReorderDrop}
+        >
+          <SlimLaneHeader
+            side="you"
+            el={youEl}
+            value={youCompile}
+            compiled={youCompiled}
+            playerIdx={youIdx}
+            lineIdx={lineIdx}
+            centered
+            grip={reorderYou}
+          />
+        </ReorderHandle>
       </div>
 
       {/* YOUR HALF — lightly tinted by your protocol, glow strongest near the centered headers */}
@@ -1130,6 +1204,66 @@ function CardStackSlot({
   );
 }
 
+/**
+ * Makes a protocol header a drag source + drop target during a reorder. When
+ * `enabled` is false it renders its child untouched, so the same header markup
+ * serves the static board and an active reorder alike. Reusable for either
+ * side's header (self-rearrange drags the bottom row, opponent-rearrange the top).
+ */
+function ReorderHandle({
+  enabled,
+  displayIdx,
+  dragging,
+  isDropTarget,
+  onDragStart,
+  onDragEnd,
+  onDrop,
+  children,
+}: {
+  enabled: boolean;
+  displayIdx: number;
+  dragging: boolean;
+  isDropTarget: boolean;
+  onDragStart: (displayIdx: number) => void;
+  onDragEnd: () => void;
+  onDrop: (displayIdx: number) => void;
+  children: React.ReactNode;
+}) {
+  const [over, setOver] = useState(false);
+  if (!enabled) return <>{children}</>;
+  return (
+    <div
+      className={`cp-reorder-handle${dragging ? " is-dragging" : ""}${
+        over && isDropTarget ? " is-over" : ""
+      }`}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", `reorder:${displayIdx}`);
+        onDragStart(displayIdx);
+      }}
+      onDragEnd={() => {
+        setOver(false);
+        onDragEnd();
+      }}
+      onDragOver={(e) => {
+        if (!isDropTarget) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setOver(false);
+        onDrop(displayIdx);
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 function SlimLaneHeader({
   side,
   el,
@@ -1138,6 +1272,7 @@ function SlimLaneHeader({
   playerIdx,
   lineIdx,
   centered,
+  grip,
 }: {
   side: "you" | "opp";
   el: string;
@@ -1149,6 +1284,8 @@ function SlimLaneHeader({
    *  top of the center band and yours below it. Each header's outer border
    *  faces its own stack (top for opp, bottom for you). */
   centered?: boolean;
+  /** Show a drag-grip affordance (Control rearrange mode). */
+  grip?: boolean;
 }) {
   const elColor = elCssVar(el);
   const compiledCls = compiled ? (side === "you" ? "cp-lane-compiled bottom" : "cp-lane-compiled") : "";
@@ -1177,6 +1314,14 @@ function SlimLaneHeader({
       }}
     >
       <div className="row gap-2 middle" style={{ alignItems: "center", minWidth: 110 }}>
+        {grip && (
+          <span
+            aria-hidden
+            style={{ color: "var(--ink-faint)", fontSize: 14, lineHeight: 1, cursor: "grab" }}
+          >
+            ⠿
+          </span>
+        )}
         <Sigil el={el} />
         <span
           className="mono"
@@ -2423,66 +2568,47 @@ function CompilePickerOverlay({
 }
 
 /**
- * Modal that surfaces the control-rearrange question. Six perm buttons + skip.
- * Only fires when the active player holds Control and is spending it — i.e.
- * just after they choose Refresh, or before a forced Compile (rules.md:51/:57).
- * Playing a card does not offer it.
+ * Non-blocking confirm bar for an in-progress protocol reorder. The reordering
+ * happens by dragging headers on the board (see `Lane` / `ReorderHandle`); this
+ * bar states the intent and commits, resets, or — Control rearrange only —
+ * skips. Drives all four reorder flows off the shared `ReorderController`.
  */
-function RearrangeOverlay({
-  client,
-  gameId,
-  question,
-  onNotify,
+function ReorderBar({
+  controller,
+  session,
 }: {
-  client: ClientSocket;
-  gameId: string;
-  question: Extract<Question, { kind: "control-rearrange" }>;
-  onNotify: NotifyFn;
+  controller: ReorderController;
+  session: ReorderSession;
 }) {
-  const perms: { order: [0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2]; label: string }[] = [
-    { order: [0, 1, 2], label: "1·2·3" },
-    { order: [0, 2, 1], label: "1·3·2" },
-    { order: [1, 0, 2], label: "2·1·3" },
-    { order: [1, 2, 0], label: "2·3·1" },
-    { order: [2, 0, 1], label: "3·1·2" },
-    { order: [2, 1, 0], label: "3·2·1" },
-  ];
-  const choose = (
-    arg: "skip" | { side: PlayerIdx; newOrder: [0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2] },
-  ) => {
-    const ans = answerForRearrange(question, arg);
-    if (!ans) {
-      onNotify("rearrange option not available", "error");
-      return;
-    }
-    send.answer(client, gameId, ans);
-  };
   return (
-    <ModalOverlay>
-      <h2 style={modalTitle}>
-        Control — rearrange your protocols (optional)
-      </h2>
-      <p
-        className="mono"
-        style={{ fontSize: 11, letterSpacing: "0.16em", color: "var(--ink-dim)" }}
-      >
-        Reorder your three protocols before this {question.reason.includes("compile") ? "compile" : "refresh"}. Skip to leave them as-is.
-      </p>
-      <div className="row gap-3" style={{ flexWrap: "wrap" }}>
-        {perms.map((p) => (
-          <button
-            key={p.label}
-            className="cp-btn primary"
-            onClick={() => choose({ side: question.forPlayerIdx, newOrder: p.order })}
-          >
-            {p.label}
+    <div className="cp-prompt-banner">
+      <div className="cp-prompt-banner-body">
+        <div className="cp-prompt-banner-head">
+          <span className="cp-prompt-banner-kind">◆ PROTOCOLS</span>
+        </div>
+        <div className="cp-prompt-banner-reason">{session.heading}</div>
+        <div className="cp-prompt-banner-instruction">{session.instruction}</div>
+      </div>
+      <div className="cp-prompt-banner-actions">
+        {controller.changed && (
+          <button className="cp-btn ghost" onClick={controller.reset}>
+            RESET
           </button>
-        ))}
-        <button className="cp-btn ghost" onClick={() => choose("skip")}>
-          SKIP
+        )}
+        {session.skippable && (
+          <button className="cp-btn ghost" onClick={controller.skip}>
+            SKIP
+          </button>
+        )}
+        <button
+          className="cp-btn primary"
+          disabled={!controller.canConfirm}
+          onClick={controller.confirm}
+        >
+          CONFIRM
         </button>
       </div>
-    </ModalOverlay>
+    </div>
   );
 }
 
