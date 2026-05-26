@@ -500,6 +500,54 @@ describe("Plague 3 — flips only uncovered face-up cards", () => {
   });
 });
 
+describe("Uncovered-only targeting (rules.md:96)", () => {
+  beforeEach(() => registerOnly([hateCards]));
+  afterEach(() => clearRegistry());
+
+  it("Hate 0 'Delete 1 card' offers only uncovered cards, not covered ones", () => {
+    const g = newGame();
+    const us = placeCard(g, 0, 1, "hate-0"); // resolver, uncovered on its own line
+    const oppCovered = placeCard(g, 1, 0, "hate-3"); // covered (bottom of stack)
+    const oppUncovered = placeCard(g, 1, 0, "hate-5"); // uncovered (top of stack)
+
+    const game = new Game(g);
+    const def = hateCards.find((c) => c.value === 0)!;
+    game.runtime.push("test:hate-0", def.middle!(makeCtx(g, us.instanceId, 0)));
+    game.runtime.pump();
+
+    const p = g.pendingPrompt;
+    expect(p?.kind).toBe("choose-card");
+    if (p?.kind !== "choose-card") throw new Error("expected choose-card prompt");
+    const ids = p.filter.instanceIds ?? [];
+    expect(ids).toContain(oppUncovered.instanceId);
+    expect(ids).not.toContain(oppCovered.instanceId);
+    expect(ids).toContain(us.instanceId); // our own uncovered card is fair game
+  });
+
+  it("Hate 2 'highest value card' ignores a higher-value covered card", () => {
+    const g = newGame();
+    placeCard(g, 0, 0, "hate-2"); // resolver
+    const ourHigh = placeCard(g, 0, 1, "hate-5"); // our highest uncovered (value 5)
+    const oppHiddenHigh = placeCard(g, 1, 0, "hate-5"); // value 5 but COVERED
+    const oppLowTop = placeCard(g, 1, 0, "hate-0"); // value 0, uncovered
+
+    const game = new Game(g);
+    const def = hateCards.find((c) => c.value === 2)!;
+    game.runtime.push("test:hate-2", def.middle!(makeCtx(g, g.stacks[0][0].cards[0]!.instanceId, 0)));
+    game.runtime.pump();
+
+    const survives = (id: string) =>
+      [...g.stacks[0].flatMap((s) => s.cards), ...g.stacks[1].flatMap((s) => s.cards)].some(
+        (c) => c.instanceId === id,
+      );
+    // Opponent's deletion lands on the uncovered low card, NOT the covered 5.
+    expect(survives(oppLowTop.instanceId)).toBe(false);
+    expect(survives(oppHiddenHigh.instanceId)).toBe(true);
+    // Our highest uncovered card was deleted (sanity on the self-side branch).
+    expect(survives(ourHigh.instanceId)).toBe(false);
+  });
+});
+
 describe("Plague 4 — silent skip when opponent has no face-down cards", () => {
   beforeEach(() => registerOnly([plagueCards]));
   afterEach(() => clearRegistry());

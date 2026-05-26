@@ -105,6 +105,52 @@ describe("phase triggers via Game.run()", () => {
     expect(g.players[0].hand.length).toBe(6);
   });
 
+  it("End: turn does not flip while an end trigger's question is still pending", () => {
+    // Regression: an end-of-turn trigger that raises a question must resolve
+    // BEFORE endTurn() flips activePlayerIdx / turnNumber. Otherwise the UI
+    // (which reads activePlayerIdx & phase) shows the next player's turn while
+    // the ending player is still answering their own card's prompt.
+    registerMockCard({
+      protocol: "spirit",
+      value: 2,
+      top: null,
+      middle: null,
+      bottom: {
+        kind: "trigger-phase",
+        phase: "end",
+        resolve: function* (ctx) {
+          yield* ctx.promptOption({
+            options: [{ id: "a", label: "A" }, { id: "b", label: "B" }],
+            reason: "end-trigger-choice",
+          });
+        },
+      },
+    });
+    const g = newGame();
+    placeCard(g, 0, 1, "spirit-2");
+    g.phase = "end";
+    const turn = g.turnNumber;
+    const game = new Game(g);
+    const blocked = game.run();
+
+    expect(blocked.kind).toBe("awaiting-answer");
+    expect(g.pendingQuestion?.forPlayerIdx).toBe(0);
+    // The turn must still belong to player 0 while their prompt is open.
+    expect(g.activePlayerIdx).toBe(0);
+    expect(g.phase).toBe("end");
+    expect(g.turnNumber).toBe(turn);
+
+    // Once they answer, the turn flips to player 1 (who then runs on to their
+    // own action phase, where the engine next blocks for input).
+    game.commit(0, {
+      kind: "single",
+      questionId: g.pendingQuestion!.questionId,
+      optionId: g.pendingQuestion!.options[0]!.id,
+    });
+    expect(g.activePlayerIdx).toBe(1);
+    expect(g.turnNumber).toBe(turn + 1);
+  });
+
   it("Start: trigger does NOT fire on the opponent's turn", () => {
     let fired = 0;
     registerMockCard({

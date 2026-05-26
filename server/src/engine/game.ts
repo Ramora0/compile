@@ -117,6 +117,11 @@ export class Game {
     if (this.state.phase === "end" && !this.endTriggersFired) {
       this.fireEndTriggers();
       this.endTriggersFired = true;
+      // Re-enter "end" so the run loop pumps these end-of-turn triggers (and
+      // surfaces any question they raise) BEFORE endTurn() flips the active
+      // player. Otherwise the turn would visibly switch while the player whose
+      // turn is ending is still resolving their card. Mirrors check-cache.
+      return { kind: "advanced", from: "end", to: "end" };
     }
     if (
       this.state.phase === "check-cache" &&
@@ -141,7 +146,7 @@ export class Game {
 
     if (result.kind === "advanced") {
       if (result.from === "start") this.startTriggersFired = false;
-      if (result.from === "end") this.endTriggersFired = false;
+      if (result.from === "end" && result.to !== "end") this.endTriggersFired = false;
       if (result.from === "check-cache" && result.to !== "check-cache") {
         this.checkCacheTriggered = false;
       }
@@ -243,16 +248,16 @@ export class Game {
   ): void {
     this.rearrangeAskedThisPhase = true;
     this.rearrangeContext = context;
-    // Allow rearranging either side; pre-build the option set for the active
-    // player's own side (most common). The client receives all 6 perms + skip;
-    // dual-side rearrange isn't currently exposed in the UI — keep that for a
-    // follow-up if needed.
+    // rules.md:98 — the holder may rearrange one player's protocols, their own
+    // OR the opponent's. Emit every permutation for both sides + skip; the
+    // client chooses which side to rearrange. applyRearrangePayload trusts the
+    // payload's side (guarded only by "must hold Control").
     this.state.pendingQuestion = {
       kind: "control-rearrange",
       questionId: this.nextQuestionId(),
       forPlayerIdx: playerIdx,
       reason: context === "before-compile" ? "rearrange-before-compile" : "rearrange-before-refresh",
-      options: enumerateRearrangeOptions(playerIdx),
+      options: enumerateRearrangeOptions(),
     };
   }
 

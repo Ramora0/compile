@@ -44,7 +44,10 @@ export function promptTargets(
   if (!q) return EMPTY_TARGETS;
 
   switch (q.kind) {
-    case "choose-line": {
+    case "choose-line":
+    case "compile-line": {
+      // compile-line carries the same `{ lineIdx }` payload shape as choose-line,
+      // so it drives the identical board line-highlight + select-then-confirm UI.
       const lines = new Set<LineIdx>();
       for (const o of q.options) {
         lines.add((o.payload as ChooseLinePayload).lineIdx);
@@ -83,13 +86,12 @@ export function promptTargets(
     }
     case "play-from-hand":
     case "action":
-    case "compile-line":
     case "control-rearrange":
     case "draft-pick":
     case "show-hand":
-      // These either drive the play UI (drag-drop), the compile overlay, the
-      // rearrange overlay, the draft screen, or an ack — none of them use the
-      // card / line / option highlight layer.
+      // These either drive the play UI (drag-drop), the rearrange overlay, the
+      // draft screen, or an ack — none of them use the card / line / option
+      // highlight layer.
       return EMPTY_TARGETS;
   }
 }

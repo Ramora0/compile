@@ -132,6 +132,22 @@ export function PreviewScreen() {
           onNotify={(msg) => console.log("[preview notify]", msg)}
         />
         <CardDetailPanel />
+        <a
+          href="?anim"
+          className="cp-btn ghost mono"
+          style={{
+            position: "fixed",
+            top: 12,
+            left: 12,
+            zIndex: 100000,
+            fontSize: 11,
+            padding: "7px 10px",
+            textDecoration: "none",
+            letterSpacing: "0.04em",
+          }}
+        >
+          🎬 animation tester →
+        </a>
       </AnchorProvider>
     </HoverProvider>
   );

@@ -23,7 +23,6 @@ import {
   answerForPlay,
   answerForPlayFromHand,
   answerForRefresh,
-  compileLinesFromQuestion,
   playTargetsFromQuestion,
 } from "./answers.js";
 import { useProtocolReorder, type ReorderController } from "./useProtocolReorder.js";
@@ -104,6 +103,56 @@ function stackOffsets(stack: RedactedCard[]): { offsets: number[]; total: number
     if (i < stack.length - 1) cum += gapAfterCard(stack[i]!);
   }
   return { offsets, total: cum };
+}
+
+// Hover-zoom on a field card scales it 1.85× (see `.cp-card-slot:hover` in
+// styles.css). Your stacks grow downward and the opponent's upward, so a card
+// in a deep stack — especially the bottom-most on your side — scales past the
+// canvas edge and gets clipped. These compute a corrective translate that nudges
+// the blown-up card back inside the 1920×1200 canvas, expressed as the CSS vars
+// the :hover transform reads. Geometry is measured in canvas coordinates:
+// offsetWidth/Height and offsetTop ignore the hover transform, and the stack
+// container (the slot's offsetParent) never carries one, so the result is
+// deterministic regardless of where the scale transition currently sits.
+const ZOOM_SCALE = 1.85; // keep in sync with `.cp-card-slot:hover` in styles.css
+const ZOOM_MARGIN = 8; // canvas px to leave between the zoomed card and the edge
+const CANVAS_W = 1920;
+const CANVAS_H = 1200;
+
+function applyZoomClamp(el: HTMLElement, side: "you" | "opp") {
+  const canvas = el.closest<HTMLElement>(".cp-canvas");
+  const container = el.offsetParent as HTMLElement | null;
+  if (!canvas || !container) return;
+  const canvasRect = canvas.getBoundingClientRect();
+  const scale = canvasRect.width / CANVAS_W || 1;
+  const containerRect = container.getBoundingClientRect();
+  // Natural (un-zoomed) card box in canvas coordinates.
+  const left = (containerRect.left - canvasRect.left) / scale + el.offsetLeft;
+  const top = (containerRect.top - canvasRect.top) / scale + el.offsetTop;
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  const centerX = left + w / 2;
+  // Origin is 50% horizontally; vertically the top edge anchors on your side
+  // (grows down) and the bottom edge on the opponent's (grows up).
+  const scaledLeft = centerX - (w * ZOOM_SCALE) / 2;
+  const scaledRight = centerX + (w * ZOOM_SCALE) / 2;
+  const scaledTop = side === "you" ? top : top + h - h * ZOOM_SCALE;
+  const scaledBottom = scaledTop + h * ZOOM_SCALE;
+
+  let dx = 0;
+  if (scaledRight > CANVAS_W - ZOOM_MARGIN) dx = CANVAS_W - ZOOM_MARGIN - scaledRight;
+  if (scaledLeft + dx < ZOOM_MARGIN) dx = ZOOM_MARGIN - scaledLeft;
+  let dy = 0;
+  if (scaledBottom > CANVAS_H - ZOOM_MARGIN) dy = CANVAS_H - ZOOM_MARGIN - scaledBottom;
+  if (scaledTop + dy < ZOOM_MARGIN) dy = ZOOM_MARGIN - scaledTop;
+
+  el.style.setProperty("--cp-zoom-dx", `${dx}px`);
+  el.style.setProperty("--cp-zoom-dy", `${dy}px`);
+}
+
+function clearZoomClamp(el: HTMLElement) {
+  el.style.setProperty("--cp-zoom-dx", "0px");
+  el.style.setProperty("--cp-zoom-dy", "0px");
 }
 
 export interface BoardScreenProps {
@@ -188,6 +237,15 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
   const [pendingCard, setPendingCard] = useState<string | null>(null);
   const [pendingLine, setPendingLine] = useState<LineIdx | null>(null);
   const [pendingOption, setPendingOption] = useState<string | null>(null);
+  // Field card being dragged to shift it (only during a "shift" choose-card).
+  const [shiftDragId, setShiftDragId] = useState<string | null>(null);
+  // After dropping a shift onto a lane we answer the choose-card immediately,
+  // then auto-answer the follow-up "shift-to" choose-line with this lane.
+  // `afterQuestionId` is the choose-card we answered, so we only act once the
+  // pending question has advanced past it.
+  const [shiftPending, setShiftPending] = useState<
+    { dest: LineIdx; afterQuestionId: string } | null
+  >(null);
   const [logExpanded, setLogExpanded] = useState(false);
   const [pileView, setPileView] = useState<{
     title: string;
@@ -198,21 +256,46 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
   // Clear any stale drag state on turn flip.
   useEffect(() => {
     setDragInstanceId(null);
+    setShiftDragId(null);
   }, [state.turnNumber, state.activePlayerIdx]);
 
-  // Clear all pending picks when the outstanding question changes.
+  // Clear all pending picks when the outstanding question changes. (shiftPending
+  // intentionally survives — it bridges the choose-card → shift-to handoff.)
   const questionId = state.pendingQuestion?.questionId ?? null;
   useEffect(() => {
     setPickedDiscards([]);
     setPendingCard(null);
     setPendingLine(null);
     setPendingOption(null);
+    setShiftDragId(null);
   }, [questionId]);
+
+  // Chain the two-step shift: once the question advances past the choose-card we
+  // answered on drop, auto-answer the follow-up "shift-to" line question with the
+  // lane the card was dropped onto — no second click/confirm.
+  useEffect(() => {
+    if (!shiftPending) return;
+    const q = state.pendingQuestion;
+    // Still showing the choose-card we just answered — wait for it to advance.
+    if (q && q.questionId === shiftPending.afterQuestionId) return;
+    if (q && q.forPlayerIdx === myIdx && q.kind === "choose-line" && q.reason === "shift-to") {
+      const ans = answerForChooseLine(q, shiftPending.dest);
+      if (ans) send.answer(client, gameId, ans);
+    }
+    // Either we just answered it, or the shift had a fixed destination (no line
+    // question followed). Drop the stored target either way so it can't bleed
+    // into a later, unrelated shift-to.
+    setShiftPending(null);
+  }, [state.pendingQuestion, shiftPending, myIdx, client, gameId]);
 
   const youPlayer = state.players[youIdx];
   const oppPlayer = state.players[oppIdx];
   const youHand = Array.isArray(youPlayer.hand) ? youPlayer.hand : [];
-  const oppHand = Array.isArray(oppPlayer.hand) ? oppPlayer.hand : [];
+  // Opponent's hand is redacted to count-only (`{ count }`), so it's never an
+  // array on this side — read the count off whichever shape arrived.
+  const oppHandCount = Array.isArray(oppPlayer.hand)
+    ? oppPlayer.hand.length
+    : oppPlayer.hand.count;
 
   const youProtocolOrder = youPlayer.protocols.map((p) => p.protocol).join(",");
   const sortedYouHand = useMemo(() => {
@@ -238,13 +321,6 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
     state.gameOver === null &&
     state.pendingQuestion?.kind === "action" &&
     state.pendingQuestion?.forPlayerIdx === myIdx;
-
-  const compilable: LineIdx[] = useMemo(() => {
-    if (!isMyTurn) return [];
-    if (state.pendingQuestion?.kind !== "compile-line") return [];
-    if (state.pendingQuestion.forPlayerIdx !== myIdx) return [];
-    return compileLinesFromQuestion(state.pendingQuestion);
-  }, [state.pendingQuestion, isMyTurn, myIdx]);
 
   // Drag-to-reorder protocols (Control rearrange, Water 2, Psychic 2, Spirit 4).
   // One controller drives all four flows; see `useProtocolReorder`.
@@ -339,6 +415,35 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
     [pendingPrompt, state],
   );
 
+  // The first half of a shift is a `choose-card` with reason "shift". When it's
+  // active, the candidate field cards become draggable and the other lanes
+  // accept the drop (see `Lane`); dropping answers this question and stashes the
+  // target lane for the follow-up "shift-to" line question.
+  const shiftChoose =
+    pendingPrompt && pendingPrompt.kind === "choose-card" && pendingPrompt.reason === "shift"
+      ? pendingPrompt
+      : null;
+
+  // Source lane of the card currently being shift-dragged (its current line is
+  // not a legal destination, so it shows no drop zone).
+  const shiftSourceLine: LineIdx | null = useMemo(() => {
+    if (!shiftDragId) return null;
+    const loc = targets.whereByInstance.get(shiftDragId);
+    return loc && loc.kind === "field" ? loc.lineIdx : null;
+  }, [shiftDragId, targets]);
+
+  const handleShiftDrop = (instanceId: string, toLineIdx: LineIdx) => {
+    if (!shiftChoose) return;
+    const ans = answerForChooseCard(shiftChoose, instanceId);
+    if (!ans) {
+      onNotify("can't shift that card", "error");
+      return;
+    }
+    setShiftDragId(null);
+    setShiftPending({ dest: toLineIdx, afterQuestionId: shiftChoose.questionId });
+    send.answer(client, gameId, ans);
+  };
+
   const handleCardPick = (instanceId: string) => {
     if (!pendingPrompt) return;
     if (!targets.cards.has(instanceId)) return;
@@ -357,7 +462,8 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
   };
 
   const handleLinePick = (lineIdx: LineIdx) => {
-    if (!pendingPrompt || pendingPrompt.kind !== "choose-line") return;
+    if (!pendingPrompt) return;
+    if (pendingPrompt.kind !== "choose-line" && pendingPrompt.kind !== "compile-line") return;
     if (!targets.lines.has(lineIdx)) return;
     setPendingLine((cur) => (cur === lineIdx ? null : lineIdx));
   };
@@ -376,6 +482,9 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
     } else if (pendingPrompt.kind === "choose-line") {
       if (pendingLine === null) return;
       ans = answerForChooseLine(pendingPrompt, pendingLine);
+    } else if (pendingPrompt.kind === "compile-line") {
+      if (pendingLine === null) return;
+      ans = answerForCompile(pendingPrompt, pendingLine);
     } else if (pendingPrompt.kind === "choose-option") {
       if (!pendingOption) return;
       ans = answerForChooseOption(pendingPrompt, pendingOption);
@@ -420,13 +529,18 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
         playContext={playContext}
         dragInstanceId={dragInstanceId}
         draggedProtocol={draggedProtocol}
-        compilable={compilable}
         onNotify={onNotify}
         targets={targets}
         pickedSet={pickedSet}
         pendingLine={pendingLine}
         onCardPick={handleCardPick}
         onLinePick={handleLinePick}
+        shiftMode={shiftChoose !== null}
+        shiftDragId={shiftDragId}
+        shiftSourceLine={shiftSourceLine}
+        onShiftDragStart={setShiftDragId}
+        onShiftDragEnd={() => setShiftDragId(null)}
+        onShiftDrop={handleShiftDrop}
         reorderSide={reorder.session ? reorder.session.targetSide : null}
         reorderOrder={reorder.order}
         reorderDragIdx={reorder.dragIdx}
@@ -441,7 +555,7 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
         oppIdx={oppIdx}
         youPlayer={youPlayer}
         oppPlayer={oppPlayer}
-        oppHandCount={oppHand.length}
+        oppHandCount={oppHandCount}
         canAct={canAct}
         onRefresh={refresh}
         onViewPile={setPileView}
@@ -463,21 +577,8 @@ export function BoardScreen({ state, client, myIdx, gameId, onNotify }: BoardScr
         <LogOverlay log={state.log} onClose={() => setLogExpanded(false)} />
       )}
 
-      {compilable.length > 0 &&
-        state.pendingQuestion?.kind === "compile-line" &&
-        state.pendingQuestion.forPlayerIdx === myIdx && (
-          <CompilePickerOverlay
-            state={state}
-            client={client}
-            gameId={gameId}
-            onNotify={onNotify}
-            question={state.pendingQuestion}
-            lines={compilable}
-          />
-        )}
-
       {reorder.session && (
-        <ReorderBar controller={reorder} session={reorder.session} />
+        <ReorderBar controller={reorder} session={reorder.session} myIdx={myIdx} />
       )}
 
       {pendingPrompt && !showHandPrompt && pendingPromptIsBanner(pendingPrompt) && (
@@ -658,13 +759,18 @@ function LanesGrid({
   playContext,
   dragInstanceId,
   draggedProtocol,
-  compilable,
   onNotify,
   targets,
   pickedSet,
   pendingLine,
   onCardPick,
   onLinePick,
+  shiftMode,
+  shiftDragId,
+  shiftSourceLine,
+  onShiftDragStart,
+  onShiftDragEnd,
+  onShiftDrop,
   reorderSide,
   reorderOrder,
   reorderDragIdx,
@@ -678,13 +784,19 @@ function LanesGrid({
   playContext: PlayContext | null;
   dragInstanceId: string | null;
   draggedProtocol: string | null;
-  compilable: LineIdx[];
   onNotify: NotifyFn;
   targets: PromptTargets;
   pickedSet: Set<string>;
   pendingLine: LineIdx | null;
   onCardPick: (instanceId: string) => void;
   onLinePick: (lineIdx: LineIdx) => void;
+  /** A "shift" choose-card is active: candidate cards drag, other lanes drop. */
+  shiftMode: boolean;
+  shiftDragId: string | null;
+  shiftSourceLine: LineIdx | null;
+  onShiftDragStart: (instanceId: string) => void;
+  onShiftDragEnd: () => void;
+  onShiftDrop: (instanceId: string, lineIdx: LineIdx) => void;
   /** Absolute player whose protocol headers are draggable now, or null. */
   reorderSide: PlayerIdx | null;
   reorderOrder: ReorderOrder;
@@ -718,13 +830,18 @@ function LanesGrid({
             playContext={playContext}
             dragInstanceId={dragInstanceId}
             draggedProtocol={draggedProtocol}
-            compilable={compilable.includes(lineIdx)}
             onNotify={onNotify}
             targets={targets}
             pickedSet={pickedSet}
             isPending={pendingLine === lineIdx}
             onCardPick={onCardPick}
             onLinePick={onLinePick}
+            shiftMode={shiftMode}
+            shiftDragId={shiftDragId}
+            shiftSourceLine={shiftSourceLine}
+            onShiftDragStart={onShiftDragStart}
+            onShiftDragEnd={onShiftDragEnd}
+            onShiftDrop={onShiftDrop}
             reorderSide={reorderSide}
             reorderSlotIdx={reorderOrder[lineIdx]}
             reorderDragIdx={reorderDragIdx}
@@ -746,13 +863,18 @@ function Lane({
   playContext,
   dragInstanceId,
   draggedProtocol,
-  compilable,
   onNotify,
   targets,
   pickedSet,
   isPending,
   onCardPick,
   onLinePick,
+  shiftMode,
+  shiftDragId,
+  shiftSourceLine,
+  onShiftDragStart,
+  onShiftDragEnd,
+  onShiftDrop,
   reorderSide,
   reorderSlotIdx,
   reorderDragIdx,
@@ -767,13 +889,18 @@ function Lane({
   playContext: PlayContext | null;
   dragInstanceId: string | null;
   draggedProtocol: string | null;
-  compilable: boolean;
   onNotify: NotifyFn;
   targets: PromptTargets;
   pickedSet: Set<string>;
   isPending: boolean;
   onCardPick: (instanceId: string) => void;
   onLinePick: (lineIdx: LineIdx) => void;
+  shiftMode: boolean;
+  shiftDragId: string | null;
+  shiftSourceLine: LineIdx | null;
+  onShiftDragStart: (instanceId: string) => void;
+  onShiftDragEnd: () => void;
+  onShiftDrop: (instanceId: string, lineIdx: LineIdx) => void;
   /** Absolute player whose protocol headers are draggable now, or null. */
   reorderSide: PlayerIdx | null;
   /** Original protocol-slot index previewed at this display line (for the reordered side). */
@@ -828,6 +955,11 @@ function Lane({
   const isReorderDropTarget =
     reorderSide !== null && reorderDragIdx !== null && reorderDragIdx !== lineIdx;
 
+  // A shift card is in flight and this lane is a legal destination (any lane but
+  // the card's current one). The whole lane becomes a single drop zone.
+  const isShiftDropTarget =
+    shiftDragId !== null && shiftSourceLine !== null && lineIdx !== shiftSourceLine;
+
   return (
     <div
       className={`cp-panel${lineIsTarget ? " is-target" : ""}${isPending ? " is-pending" : ""}`}
@@ -841,12 +973,6 @@ function Lane({
         borderColor: youCompiled || oppCompiled ? "var(--line-3)" : "var(--line-2)",
         overflow: "hidden",
         cursor: lineIsTarget ? "pointer" : undefined,
-        ...(compilable
-          ? {
-              boxShadow:
-                "0 0 0 1px var(--purple-400), 0 0 32px rgba(var(--purple-glow), 0.4)",
-            }
-          : null),
       }}
     >
       {/* OPP HALF — lightly tinted by opp's protocol, glow strongest near the centered headers */}
@@ -889,6 +1015,9 @@ function Lane({
                 selectable={selectable}
                 selected={pickedSet.has(c.instanceId)}
                 onPick={selectable ? onCardPick : undefined}
+                shiftDraggable={shiftMode && selectable}
+                onShiftDragStart={onShiftDragStart}
+                onShiftDragEnd={onShiftDragEnd}
                 playerIdx={oppIdx}
                 lineIdx={lineIdx}
                 side="opp"
@@ -1023,6 +1152,9 @@ function Lane({
                 selectable={selectable}
                 selected={pickedSet.has(c.instanceId)}
                 onPick={selectable ? onCardPick : undefined}
+                shiftDraggable={shiftMode && selectable}
+                onShiftDragStart={onShiftDragStart}
+                onShiftDragEnd={onShiftDragEnd}
                 playerIdx={youIdx}
                 lineIdx={lineIdx}
                 side="you"
@@ -1067,6 +1199,56 @@ function Lane({
             )}
           </div>
         )}
+      </div>
+
+      {isShiftDropTarget && shiftDragId && (
+        <ShiftDropZone
+          lineIdx={lineIdx}
+          onDrop={() => onShiftDrop(shiftDragId, lineIdx)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ShiftDropZone({
+  lineIdx,
+  onDrop,
+}: {
+  lineIdx: LineIdx;
+  onDrop: () => void;
+}) {
+  const [over, setOver] = useState(false);
+  // Covers the whole lane (both halves) — a shift targets the line, not a side.
+  // Sits above selectable cards (which lift to z-index 500) so it always catches
+  // the drop.
+  return (
+    <div
+      className="cp-drop-zones"
+      style={{ inset: 6, zIndex: 600, pointerEvents: "auto" }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        if (!over) setOver(true);
+      }}
+      onDragEnter={(e) => {
+        e.preventDefault();
+        setOver(true);
+      }}
+      onDragLeave={(e) => {
+        const r = e.relatedTarget as Node | null;
+        if (r && e.currentTarget.contains(r)) return;
+        setOver(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setOver(false);
+        onDrop();
+      }}
+    >
+      <div className={`cp-drop-zone legal${over ? " over" : ""}`}>
+        <span className="cp-drop-zone-label">SHIFT TO L{lineIdx + 1}</span>
+        <span className="cp-drop-zone-hint">DROP HERE</span>
       </div>
     </div>
   );
@@ -1128,6 +1310,9 @@ function CardStackSlot({
   selectable,
   selected,
   onPick,
+  shiftDraggable,
+  onShiftDragStart,
+  onShiftDragEnd,
   playerIdx,
   lineIdx,
   side,
@@ -1144,6 +1329,10 @@ function CardStackSlot({
   selectable?: boolean;
   selected?: boolean;
   onPick?: (instanceId: string) => void;
+  /** Drag this card onto another lane to shift it (a "shift" choose-card). */
+  shiftDraggable?: boolean;
+  onShiftDragStart?: (instanceId: string) => void;
+  onShiftDragEnd?: () => void;
   playerIdx: PlayerIdx;
   lineIdx: LineIdx;
   side: "you" | "opp";
@@ -1177,13 +1366,15 @@ function CardStackSlot({
         ...positionStyle,
         zIndex,
         filter: isTop || selectable ? "none" : "brightness(0.85)",
-        cursor: selectable ? "pointer" : undefined,
+        cursor: shiftDraggable ? "grab" : selectable ? "pointer" : undefined,
       }}
       onClick={(e) => {
         if (!selectable || !onPick) return;
         e.stopPropagation();
         onPick(instanceId);
       }}
+      onMouseEnter={(e) => applyZoomClamp(e.currentTarget, side)}
+      onMouseLeave={(e) => clearZoomClamp(e.currentTarget)}
     >
       <Card
         el={el}
@@ -1195,6 +1386,17 @@ function CardStackSlot({
         bottom={info?.bottom}
         size="field"
         className={`${selectable ? "is-selectable" : ""}${selected ? " is-selected" : ""}`}
+        draggable={shiftDraggable}
+        onDragStart={
+          shiftDraggable
+            ? (e) => {
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", instanceId);
+                onShiftDragStart?.(instanceId);
+              }
+            : undefined
+        }
+        onDragEnd={shiftDraggable ? () => onShiftDragEnd?.() : undefined}
         onMouseEnter={() => cardId && setHovered(cardId)}
         onMouseLeave={() => setHovered(null)}
       />
@@ -2527,46 +2729,6 @@ function HandCard({
 // Overlays
 // ────────────────────────────────────────────────────────────
 
-function CompilePickerOverlay({
-  state,
-  client,
-  gameId,
-  onNotify,
-  question,
-  lines,
-}: {
-  state: RedactedState;
-  client: ClientSocket;
-  gameId: string;
-  onNotify: NotifyFn;
-  question: Extract<Question, { kind: "compile-line" }>;
-  lines: LineIdx[];
-}) {
-  const player = state.players[state.activePlayerIdx];
-  const choose = (l: LineIdx) => {
-    const ans = answerForCompile(question, l);
-    if (!ans) {
-      onNotify("compile line not available", "error");
-      return;
-    }
-    send.answer(client, gameId, ans);
-  };
-  return (
-    <ModalOverlay>
-      <h2 style={modalTitle}>
-        Compile — Player {state.activePlayerIdx + 1} must compile a line
-      </h2>
-      <div className="row gap-3" style={{ flexWrap: "wrap" }}>
-        {lines.map((l) => (
-          <button key={l} className="cp-btn primary" onClick={() => choose(l)}>
-            LINE {l + 1} · {player.protocols[l]?.protocol.toUpperCase()}
-          </button>
-        ))}
-      </div>
-    </ModalOverlay>
-  );
-}
-
 /**
  * Non-blocking confirm bar for an in-progress protocol reorder. The reordering
  * happens by dragging headers on the board (see `Lane` / `ReorderHandle`); this
@@ -2576,10 +2738,13 @@ function CompilePickerOverlay({
 function ReorderBar({
   controller,
   session,
+  myIdx,
 }: {
   controller: ReorderController;
   session: ReorderSession;
+  myIdx: PlayerIdx;
 }) {
+  const oppIdx = (1 - myIdx) as PlayerIdx;
   return (
     <div className="cp-prompt-banner">
       <div className="cp-prompt-banner-body">
@@ -2590,6 +2755,24 @@ function ReorderBar({
         <div className="cp-prompt-banner-instruction">{session.instruction}</div>
       </div>
       <div className="cp-prompt-banner-actions">
+        {session.chooseSide && (
+          <div className="cp-reorder-side-toggle" role="group" aria-label="Which side to rearrange">
+            <button
+              className={`cp-btn ghost${session.targetSide === myIdx ? " is-active" : ""}`}
+              aria-pressed={session.targetSide === myIdx}
+              onClick={() => controller.setTargetSide(myIdx)}
+            >
+              YOURS
+            </button>
+            <button
+              className={`cp-btn ghost${session.targetSide === oppIdx ? " is-active" : ""}`}
+              aria-pressed={session.targetSide === oppIdx}
+              onClick={() => controller.setTargetSide(oppIdx)}
+            >
+              OPPONENT'S
+            </button>
+          </div>
+        )}
         {controller.changed && (
           <button className="cp-btn ghost" onClick={controller.reset}>
             RESET
@@ -2616,6 +2799,7 @@ function pendingPromptIsBanner(q: Question): boolean {
   return (
     q.kind === "choose-card" ||
     q.kind === "choose-line" ||
+    q.kind === "compile-line" ||
     q.kind === "choose-option" ||
     q.kind === "discard-selection" ||
     q.kind === "play-from-hand"
@@ -2646,15 +2830,27 @@ function PromptBanner({
   const discardCount =
     prompt.kind === "discard-selection" ? (prompt.picks?.min ?? 1) : 0;
   const targetCount =
-    prompt.kind === "choose-line" ? targets.lines.size : targets.cards.size;
+    prompt.kind === "choose-line" || prompt.kind === "compile-line"
+      ? targets.lines.size
+      : targets.cards.size;
 
   let instruction = "";
   switch (prompt.kind) {
     case "choose-card":
-      instruction = pendingCard ? "Confirm your pick or click another card" : "Click a highlighted card";
+      instruction =
+        prompt.reason === "shift"
+          ? "Drag a highlighted card onto another lane to shift it"
+          : pendingCard
+            ? "Confirm your pick or click another card"
+            : "Click a highlighted card";
       break;
     case "choose-line":
       instruction = pendingLine !== null ? "Confirm your pick or click another line" : "Click a highlighted line";
+      break;
+    case "compile-line":
+      instruction = pendingLine !== null
+        ? "Confirm to compile this line, or click another"
+        : "Click a highlighted line to compile";
       break;
     case "choose-option":
       instruction = pendingOption ? "Confirm your pick or choose another option" : "Pick an option";
@@ -2695,11 +2891,13 @@ function PromptBanner({
   const showConfirm =
     prompt.kind === "choose-card" ||
     prompt.kind === "choose-line" ||
+    prompt.kind === "compile-line" ||
     prompt.kind === "choose-option" ||
     prompt.kind === "discard-selection";
   const confirmEnabled =
     (prompt.kind === "choose-card" && pendingCard !== null) ||
     (prompt.kind === "choose-line" && pendingLine !== null) ||
+    (prompt.kind === "compile-line" && pendingLine !== null) ||
     (prompt.kind === "choose-option" && pendingOption !== null) ||
     (prompt.kind === "discard-selection" && pickedCount === discardCount);
 
@@ -2708,9 +2906,11 @@ function PromptBanner({
       <div className="cp-prompt-banner-body">
         <div className="cp-prompt-banner-head">
           <span className="cp-prompt-banner-kind">
-            ◆ PLAYER {prompt.forPlayerIdx + 1} · PROMPT
+            ◆ PLAYER {prompt.forPlayerIdx + 1} · {prompt.kind === "compile-line" ? "COMPILE" : "PROMPT"}
           </span>
-          {(prompt.kind === "choose-card" || prompt.kind === "choose-line") && (
+          {(prompt.kind === "choose-card" ||
+            prompt.kind === "choose-line" ||
+            prompt.kind === "compile-line") && (
             <span className="cp-prompt-banner-count">{targetCount} target{targetCount === 1 ? "" : "s"}</span>
           )}
           {prompt.kind === "discard-selection" && (
@@ -2719,7 +2919,9 @@ function PromptBanner({
             </span>
           )}
         </div>
-        <div className="cp-prompt-banner-reason">{prompt.reason}</div>
+        {prompt.kind !== "compile-line" && (
+          <div className="cp-prompt-banner-reason">{prompt.reason}</div>
+        )}
         <div className="cp-prompt-banner-instruction">{instruction}</div>
       </div>
 

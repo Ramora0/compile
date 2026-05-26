@@ -5,9 +5,9 @@
  */
 import { legalPlayLines, validatePlayCard } from "./actions.js";
 import { compilableLines, LINE_INDICES } from "./field.js";
-import type { GameState, LineIdx, PlayerIdx } from "./types.js";
+import { matchesCardFilter } from "./cardFilter.js";
+import type { GameState, PlayerIdx } from "./types.js";
 import type {
-  CardFilter,
   ChooseCardPrompt,
   DiscardSelectionPrompt,
   PlayFromHandPrompt,
@@ -69,14 +69,21 @@ const PERMS_3: ReadonlyArray<[0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2]> = [
   [2, 1, 0],
 ];
 
-export function enumerateRearrangeOptions(side: PlayerIdx): Option[] {
+/**
+ * Control-rearrange options (rules.md:98): the holder may rearrange ONE
+ * player's protocols — their own OR the opponent's. Emit every permutation for
+ * both sides plus a single skip; the client picks the side and the order.
+ */
+export function enumerateRearrangeOptions(): Option[] {
   const out: Option[] = [];
-  for (const order of PERMS_3) {
-    out.push({
-      id: `rearrange:${side}:${order.join(",")}`,
-      label: `P${side + 1}: ${order.map((i) => `L${i + 1}`).join("→")}`,
-      payload: { kind: "rearrange", side, newOrder: order },
-    });
+  for (const side of [0, 1] as PlayerIdx[]) {
+    for (const order of PERMS_3) {
+      out.push({
+        id: `rearrange:${side}:${order.join(",")}`,
+        label: `P${side + 1}: ${order.map((i) => `L${i + 1}`).join("→")}`,
+        payload: { kind: "rearrange", side, newOrder: order },
+      });
+    }
   }
   out.push({
     id: "rearrange:skip",
@@ -120,31 +127,6 @@ export function enumerateDraftOptions(
 
 // ---------- Prompt → Options ----------
 
-function matchesFilter(
-  state: GameState,
-  filter: CardFilter,
-  forPlayerIdx: PlayerIdx,
-  loc: { kind: "field"; side: PlayerIdx; lineIdx: LineIdx; covered: boolean } | { kind: "hand"; ownerIdx: PlayerIdx },
-  card: { instanceId: string; cardId: string; faceDown: boolean; ownerIdx: PlayerIdx },
-): boolean {
-  if (filter.instanceIds && !filter.instanceIds.includes(card.instanceId)) return false;
-  if (filter.ownerIdx !== undefined && card.ownerIdx !== filter.ownerIdx) return false;
-  if (filter.faceUp === true && card.faceDown) return false;
-  if (filter.faceDown === true && !card.faceDown) return false;
-  if (loc.kind === "field") {
-    if (filter.side === "self" && loc.side !== forPlayerIdx) return false;
-    if (filter.side === "opp" && loc.side === forPlayerIdx) return false;
-    if (filter.inLines && !filter.inLines.includes(loc.lineIdx)) return false;
-    if (filter.covered === true && !loc.covered) return false;
-    if (filter.uncovered === true && loc.covered) return false;
-  } else {
-    if (!filter.instanceIds) return false;
-    if (filter.side === "self" && loc.ownerIdx !== forPlayerIdx) return false;
-    if (filter.side === "opp" && loc.ownerIdx === forPlayerIdx) return false;
-  }
-  return true;
-}
-
 export function enumerateChooseCardOptions(
   state: GameState,
   prompt: ChooseCardPrompt,
@@ -159,8 +141,7 @@ export function enumerateChooseCardOptions(
         const card = stack[i]!;
         const covered = i !== stack.length - 1;
         if (
-          matchesFilter(
-            state,
+          matchesCardFilter(
             prompt.filter,
             prompt.forPlayerIdx,
             { kind: "field", side, lineIdx, covered },
@@ -181,8 +162,7 @@ export function enumerateChooseCardOptions(
     const ownerIdx = p as PlayerIdx;
     for (const card of state.players[ownerIdx].hand) {
       if (
-        matchesFilter(
-          state,
+        matchesCardFilter(
           prompt.filter,
           prompt.forPlayerIdx,
           { kind: "hand", ownerIdx },

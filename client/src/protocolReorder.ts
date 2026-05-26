@@ -42,6 +42,14 @@ export function moveIndex(order: ReorderOrder, from: number, to: number): Reorde
   return [next[0]!, next[1]!, next[2]!] as ReorderOrder;
 }
 
+/** Swap the two positions `a` and `b` in place (no shifting of the rest). */
+export function swapIndices(order: ReorderOrder, a: number, b: number): ReorderOrder {
+  if (a === b) return order;
+  const next = [...order];
+  [next[a], next[b]] = [next[b]!, next[a]!];
+  return [next[0]!, next[1]!, next[2]!] as ReorderOrder;
+}
+
 /** A single transposition of positions `a` and `b`, applied to identity. */
 export function swapPositions(a: number, b: number): ReorderOrder {
   const next: [0 | 1 | 2, 0 | 1 | 2, 0 | 1 | 2] = [0, 1, 2];
@@ -69,10 +77,18 @@ export interface ReorderSession {
   mode: ReorderMode;
   /** Whether a "leave as-is" skip is offered (Control rearrange only). */
   skippable: boolean;
+  /**
+   * Whether the player picks which side to rearrange (Control rearrange only —
+   * rules.md:98 lets the holder rearrange their own OR the opponent's
+   * protocols). Other flows fix the side.
+   */
+  chooseSide: boolean;
   heading: string;
   instruction: string;
 }
 
+/** Reason on the first prompt of a Spirit-4 swap (the drag-to-swap gesture). */
+export const SWAP_FIRST_REASON = "swap-protocol-a";
 /** Reason on the second prompt of a Spirit-4 swap, answered via the handshake. */
 export const SWAP_SECOND_REASON = "swap-protocol-b";
 
@@ -94,8 +110,9 @@ export function deriveReorderSession(
       targetSide: myIdx,
       mode: "permute",
       skippable: true,
+      chooseSide: true,
       heading: "Control · rearrange",
-      instruction: `Drag your protocol headers to reorder them before this ${verb}. Cards stay put.`,
+      instruction: `Pick a side, then drag its protocol headers to reorder them before this ${verb}. Cards stay put.`,
     };
   }
 
@@ -106,6 +123,7 @@ export function deriveReorderSession(
       targetSide: self ? myIdx : ((1 - myIdx) as PlayerIdx),
       mode: "permute",
       skippable: false,
+      chooseSide: false,
       heading: self ? "Rearrange your protocols" : "Rearrange opponent's protocols",
       instruction: self
         ? "Drag your protocol headers to reorder them. Cards stay put."
@@ -113,12 +131,13 @@ export function deriveReorderSession(
     };
   }
 
-  if (q.kind === "choose-line" && q.reason === "swap-protocol-a") {
+  if (q.kind === "choose-line" && q.reason === SWAP_FIRST_REASON) {
     return {
       questionId: q.questionId,
       targetSide: myIdx,
       mode: "swap",
       skippable: false,
+      chooseSide: false,
       heading: "Swap two protocols",
       instruction: "Drag one of your protocol headers onto another to swap the two. Cards stay put.",
     };
@@ -127,11 +146,20 @@ export function deriveReorderSession(
   return null;
 }
 
-/** Build the Answer that commits `order` for a permute-style question. */
-export function buildPermuteAnswer(q: Question, order: ReorderOrder): Answer | null {
+/**
+ * Build the Answer that commits `order` for a permute-style question.
+ * `targetSide` is the side being rearranged — for Control rearrange this may be
+ * the opponent (rules.md:98); for the choose-option flows it's fixed by the
+ * card and ignored here (the side lives in the matched option).
+ */
+export function buildPermuteAnswer(
+  q: Question,
+  order: ReorderOrder,
+  targetSide: PlayerIdx,
+): Answer | null {
   if (q.kind === "control-rearrange") {
     return answerForRearrange(q, {
-      side: q.forPlayerIdx,
+      side: targetSide,
       newOrder: [order[0], order[1], order[2]],
     });
   }

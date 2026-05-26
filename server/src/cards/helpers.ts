@@ -17,6 +17,7 @@ import type { CardCtxFull } from "../engine/ctx.js";
 import type { CardFilter, Op, OpResult } from "../engine/ops.js";
 import type { CardInstance, GameState, LineIdx, PlayerIdx, Side } from "../engine/types.js";
 import { cardValue, findCardOnField, printedValue } from "../engine/field.js";
+import { matchesCardFilter } from "../engine/cardFilter.js";
 import { rearrangeProtocols } from "../engine/control.js";
 
 export type Eff<T = void> = Generator<Op, T, OpResult>;
@@ -123,6 +124,21 @@ export function listFieldCards(state: GameState): FieldEntry[] {
   return out;
 }
 
+/**
+ * The uncovered (top) card of every stack — the cards that ordinary "1 card"
+ * text may manipulate (rules.md:96). Selection that bypasses `chooseField`
+ * (e.g. value-based picks) should source from here so the uncovered-only rule
+ * stays consistent.
+ */
+export function uncoveredFieldCards(state: GameState): FieldEntry[] {
+  return listFieldCards(state).filter((e) => !e.covered);
+}
+
+/** Every covered card — reachable only by text that says "covered"/"all". */
+export function coveredFieldCards(state: GameState): FieldEntry[] {
+  return listFieldCards(state).filter((e) => e.covered);
+}
+
 export interface FieldFilter {
   side?: "self" | "opp" | "any";
   faceUp?: boolean;
@@ -149,14 +165,13 @@ export function filterField(ctx: CardCtxFull, f: FieldFilter): FieldEntry[] {
   const all = listFieldCards(ctx.state());
   return all.filter((e) => {
     const { card, playerIdx, lineIdx, covered } = e;
+    // Common side / face / covered / line semantics live in the one shared
+    // predicate (engine/cardFilter.ts), so this and the engine's option
+    // enumeration can't drift. The card-only extras below layer on top.
     if (f.excludeInstanceId && card.instanceId === f.excludeInstanceId) return false;
-    if (f.side === "self" && playerIdx !== ctx.self) return false;
-    if (f.side === "opp" && playerIdx !== ctx.opp) return false;
-    if (f.faceUp && card.faceDown) return false;
-    if (f.faceDown && !card.faceDown) return false;
-    if (f.covered && !covered) return false;
-    if (f.uncovered && covered) return false;
-    if (f.inLines && !f.inLines.includes(lineIdx)) return false;
+    if (!matchesCardFilter(f, ctx.self, { kind: "field", side: playerIdx, lineIdx, covered }, card)) {
+      return false;
+    }
     if (f.printedValueIn) {
       if (card.faceDown) return false;
       if (!f.printedValueIn.includes(printedValue(card))) return false;
@@ -188,7 +203,17 @@ export function* chooseField(
   filter: FieldFilter,
   opts: ChooseOpts = {},
 ): Eff<string | null> {
-  const cands = filterField(ctx, filter);
+  // rules.md:96 — a single-target selection ("1 card", "1 of your cards", …)
+  // may only reach the UNCOVERED (top) card of a line. Covered cards are
+  // selectable only by text that says "covered"/"all", which those cards
+  // express by passing `covered: true`. So default to uncovered-only unless the
+  // caller opts into covered (`covered: true`) or explicitly opts out with
+  // `uncovered: false` (a rare "any card, covered or not" effect).
+  const scoped: FieldFilter =
+    filter.covered === undefined && filter.uncovered === undefined
+      ? { ...filter, uncovered: true }
+      : filter;
+  const cands = filterField(ctx, scoped);
   if (cands.length === 0) return null;
   const id = yield* ctx.promptCard({
     filter: filterByIds(cands.map((c) => c.card.instanceId)),
@@ -498,36 +523,17 @@ export const sides: readonly Side[] = ["self", "opp"];
  * them higher. Returning null only happens when the player has no field cards.
  */
 export function highestValueCardOf(state: GameState, playerIdx: PlayerIdx): CardInstance | null {
+  // rules.md:96 — "your highest value card" can only be a card you may
+  // manipulate, i.e. an UNCOVERED card; covered cards are off-limits unless the
+  // text says "covered"/"all". Sourcing from `uncoveredFieldCards` keeps that
+  // rule in one place instead of re-deriving "covered" by stack index.
   let best: CardInstance | null = null;
   let bestVal = -1;
-  for (let l = 0; l < state.stacks[playerIdx].length; l++) {
-    const lineIdx = l as LineIdx;
-    const stack = state.stacks[playerIdx][lineIdx];
-    for (const c of stack.cards) {
-      const v = cardValue(state, c, playerIdx, lineIdx);
-      if (v > bestVal) {
-        best = c;
-        bestVal = v;
-      }
-    }
-  }
-  return best;
-}
-
-/** Lowest-value covered card in a specific side+line. Face-down counts as 2. */
-export function lowestCoveredOfLine(
-  state: GameState,
-  playerIdx: PlayerIdx,
-  lineIdx: LineIdx,
-): CardInstance | null {
-  const stack = state.stacks[playerIdx][lineIdx].cards;
-  let best: CardInstance | null = null;
-  let bestVal = Infinity;
-  for (let i = 0; i < stack.length - 1; i++) {
-    const c = stack[i]!;
-    const v = cardValue(state, c, playerIdx, lineIdx);
-    if (v < bestVal) {
-      best = c;
+  for (const e of uncoveredFieldCards(state)) {
+    if (e.playerIdx !== playerIdx) continue;
+    const v = cardValue(state, e.card, e.playerIdx, e.lineIdx);
+    if (v > bestVal) {
+      best = e.card;
       bestVal = v;
     }
   }
@@ -545,15 +551,12 @@ export function lowestCoveredInLine(
 ): CardInstance | null {
   let best: CardInstance | null = null;
   let bestVal = Infinity;
-  for (const p of [0, 1] as const) {
-    const stack = state.stacks[p][lineIdx].cards;
-    for (let i = 0; i < stack.length - 1; i++) {
-      const c = stack[i]!;
-      const v = cardValue(state, c, p, lineIdx);
-      if (v < bestVal) {
-        best = c;
-        bestVal = v;
-      }
+  for (const e of coveredFieldCards(state)) {
+    if (e.lineIdx !== lineIdx) continue;
+    const v = cardValue(state, e.card, e.playerIdx, e.lineIdx);
+    if (v < bestVal) {
+      best = e.card;
+      bestVal = v;
     }
   }
   return best;

@@ -383,21 +383,27 @@ html, body, #root {
 }
 .cp-card-facedown-points {
   font-family: 'Space Grotesk', sans-serif;
-  font-size: calc(var(--cp-card-w) * 0.09);
+  /* Match the front number (.cp-card-num) exactly so face-up and face-down
+     values are always the same size. */
+  font-size: calc(var(--cp-card-w) * 0.157);
   font-weight: 700;
-  line-height: 1;
+  line-height: 0.9;
   color: var(--purple-300);
   text-shadow: 0 0 8px rgba(var(--purple-glow), 0.7);
 }
-/* Field cards intentionally show the face-down value larger than proportional
-   so it stays readable on the smaller card body. */
-.cp-card.field .cp-card-facedown-points { font-size: 20px; }
 
 /* Reveal-on-hover: rotate the whole card so the front face swings into
    view. Only attached for the local player's own face-down table cards —
    opp face-down cards never get this class. The border color also fades
-   from purple (face-down) to the element color (face-up) during the flip. */
-.cp-card.reveal-on-hover:hover {
+   from purple (face-down) to the element color (face-up) during the flip.
+
+   The hover is keyed on the stable .cp-card-slot wrapper, NOT on the card
+   itself: the card is the 3D flipper, so its projected hitbox shrinks and
+   swings during the rotation. Keying :hover on the rotating element makes
+   the cursor fall off mid-flip, dropping :hover and bouncing the animation
+   back (flicker). The slot is never 3D-transformed, so its hitbox stays put
+   and the flip — and the selection target — stay rock-steady. */
+.cp-card-slot:hover .cp-card.reveal-on-hover {
   border-color: var(--el-color, var(--line-2));
   box-shadow:
     0 0 0 1px rgba(255,255,255,0.04) inset,
@@ -567,15 +573,19 @@ html, body, #root {
 
 /* table-card wrapper: hover blows the card up so rules are easy to read.
    Stacks anchor against the lane's centered headers, so cards grow outward
-   into the empty half-space: opp-side grows up, your-side grows down. z-index
-   !important wins over the inline z-index that handles natural stack layering. */
+   into the empty half-space: opp-side grows up, your-side grows down. The
+   --cp-zoom-d{x,y} vars (set by applyZoomClamp in BoardScreen) nudge the
+   blown-up card back inside the canvas when it would otherwise spill off an
+   edge — e.g. the bottom card of a deep stack growing past the screen bottom.
+   z-index !important wins over the inline z-index that handles natural stack
+   layering. Keep the 1.85 scale in sync with ZOOM_SCALE in BoardScreen. */
 .cp-card-slot {
   transition: transform 0.18s ease, filter 0.18s ease;
 }
 .cp-card-slot.side-you { transform-origin: 50% 0%; }
 .cp-card-slot.side-opp { transform-origin: 50% 100%; }
 .cp-card-slot:hover {
-  transform: scale(1.85);
+  transform: translate(var(--cp-zoom-dx, 0px), var(--cp-zoom-dy, 0px)) scale(1.85);
   z-index: 999 !important;
   filter: drop-shadow(0 22px 32px rgba(0, 0, 0, 0.6)) !important;
 }
@@ -685,6 +695,22 @@ html, body, #root {
   flex-shrink: 0;
   flex-wrap: wrap;
   align-items: center;
+}
+
+/* Control rearrange — pick which side's protocols to reorder */
+.cp-reorder-side-toggle {
+  display: inline-flex;
+  gap: 4px;
+  margin-right: 4px;
+}
+.cp-reorder-side-toggle .cp-btn {
+  padding: 8px 12px;
+}
+.cp-reorder-side-toggle .cp-btn.is-active {
+  border-color: var(--purple-400);
+  color: #fff;
+  background: rgba(var(--purple-glow), 0.18);
+  box-shadow: 0 0 0 1px var(--purple-400) inset;
 }
 
 /* protocol reorder — draggable protocol headers on the board */
